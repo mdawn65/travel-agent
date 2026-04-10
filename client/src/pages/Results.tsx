@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import { useParams, useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Plane, Hotel, MapPin, ArrowLeft, Clock, Star, Users, Calendar, DollarSign, Wifi, Coffee, Utensils, Wind, Zap, Globe2, Info } from "lucide-react";
+import {
+  Plane, Hotel, MapPin, ArrowLeft, Clock, Star, Users, Calendar,
+  Wifi, Coffee, Utensils, Wind, Zap, Globe2, Info,
+  AlertTriangle, CheckCircle2, RefreshCw, CalendarDays,
+  DollarSign, Loader2, ChevronDown, ChevronUp, Sparkles
+} from "lucide-react";
 import type { Search } from "@shared/schema";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -36,29 +41,28 @@ function AmenityIcon({ amenity }: { amenity: string }) {
 function LoadingState({ destination }: { destination: string }) {
   const steps = [
     { icon: Plane, label: "Searching flights..." },
-    { icon: Hotel, label: "Finding accommodations..." },
-    { icon: MapPin, label: "Discovering attractions..." },
+    { icon: Hotel, label: "Finding accommodations on Trivago..." },
+    { icon: MapPin, label: "Discovering top attractions..." },
+    { icon: CalendarDays, label: "Building day-by-day itinerary..." },
+    { icon: AlertTriangle, label: "Checking for disruptions..." },
   ];
   const [activeStep, setActiveStep] = useState(0);
 
   useEffect(() => {
     const interval = setInterval(() => {
       setActiveStep(s => (s + 1) % steps.length);
-    }, 2000);
+    }, 2500);
     return () => clearInterval(interval);
   }, []);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6 bg-background">
       <div className="text-center max-w-md">
-        {/* Animated globe */}
         <div className="w-20 h-20 mx-auto mb-8 rounded-full bg-primary/10 flex items-center justify-center">
           <Globe2 className="w-10 h-10 text-ocean animate-spin" style={{ animationDuration: "3s" }} />
         </div>
-
         <h2 className="font-display text-2xl font-bold mb-2">Planning your trip to</h2>
         <h3 className="font-display text-3xl font-bold text-ocean mb-6">{destination}</h3>
-
         <div className="space-y-3 mb-8">
           {steps.map(({ icon: Icon, label }, i) => (
             <div
@@ -67,7 +71,7 @@ function LoadingState({ destination }: { destination: string }) {
                 i === activeStep
                   ? "bg-primary/10 border border-primary/30 text-foreground"
                   : i < activeStep
-                  ? "text-muted-foreground line-through"
+                  ? "text-muted-foreground"
                   : "text-muted-foreground opacity-50"
               }`}
             >
@@ -78,12 +82,275 @@ function LoadingState({ destination }: { destination: string }) {
                   <span /><span /><span />
                 </div>
               )}
+              {i < activeStep && <CheckCircle2 className="w-4 h-4 ml-auto text-green-500" />}
             </div>
           ))}
         </div>
-
-        <p className="text-sm text-muted-foreground">Our AI is arranging the best options for you...</p>
+        <p className="text-sm text-muted-foreground">Our agentic AI is building your full trip plan...</p>
       </div>
+    </div>
+  );
+}
+
+// ─── Disruption Alert Bar ──────────────────────────────────────────────────────
+
+function DisruptionAlertBar({ searchId, alertData: initialAlertData, flightNumber }: {
+  searchId: number;
+  alertData: any;
+  flightNumber?: string;
+}) {
+  const [alertData, setAlertData] = useState(initialAlertData);
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const recheckMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/searches/${searchId}/check-disruptions`, {});
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setAlertData(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/searches", searchId] });
+    },
+  });
+
+  if (!alertData) return null;
+
+  const alerts: any[] = alertData.alerts || [];
+  const hasIssues = alerts.some((a: any) => a.type !== "normal");
+  const highSeverity = alerts.some((a: any) => a.severity === "high");
+
+  const barColor = highSeverity
+    ? "bg-red-50 border-red-200 dark:bg-red-900/10 dark:border-red-800/30"
+    : hasIssues
+    ? "bg-amber-50 border-amber-200 dark:bg-amber-900/10 dark:border-amber-800/30"
+    : "bg-green-50 border-green-200 dark:bg-green-900/10 dark:border-green-800/30";
+
+  const iconColor = highSeverity ? "text-red-500" : hasIssues ? "text-amber-500" : "text-green-500";
+  const AlertIcon = highSeverity || hasIssues ? AlertTriangle : CheckCircle2;
+
+  const checkedAt = alertData.checkedAt ? new Date(alertData.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+
+  return (
+    <div className={`rounded-2xl border p-4 mb-6 ${barColor}`}>
+      <div className="flex items-center justify-between gap-3">
+        <button
+          className="flex items-center gap-2 flex-1 text-left"
+          onClick={() => setIsExpanded(!isExpanded)}
+          data-testid="button-toggle-alerts"
+        >
+          <AlertIcon className={`w-4 h-4 shrink-0 ${iconColor}`} />
+          <span className="font-body font-semibold text-sm">
+            {highSeverity ? "Flight disruption detected" : hasIssues ? "Minor disruptions detected" : "Your route looks clear"}
+          </span>
+          {alerts.length > 0 && (
+            <Badge variant="secondary" className="text-xs ml-1">{alerts.length}</Badge>
+          )}
+          {checkedAt && (
+            <span className="text-xs text-muted-foreground ml-auto">Checked {checkedAt}</span>
+          )}
+          {isExpanded ? <ChevronUp className="w-3.5 h-3.5 ml-2 shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 ml-2 shrink-0" />}
+        </button>
+        <Button
+          data-testid="button-recheck-disruptions"
+          size="sm"
+          variant="ghost"
+          onClick={() => recheckMutation.mutate()}
+          disabled={recheckMutation.isPending}
+          className="h-7 px-2 text-xs shrink-0"
+        >
+          {recheckMutation.isPending ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="w-3.5 h-3.5" />
+          )}
+        </Button>
+      </div>
+
+      {isExpanded && alerts.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {alertData.airportStatus && (
+            <div className="text-xs text-muted-foreground grid grid-cols-2 gap-2 mb-3">
+              {alertData.airportStatus.origin && (
+                <div className="bg-white/50 dark:bg-white/5 rounded-lg p-2">
+                  <div className="font-medium text-foreground mb-0.5">Origin Airport</div>
+                  <div>{alertData.airportStatus.origin}</div>
+                </div>
+              )}
+              {alertData.airportStatus.destination && (
+                <div className="bg-white/50 dark:bg-white/5 rounded-lg p-2">
+                  <div className="font-medium text-foreground mb-0.5">Destination Airport</div>
+                  <div>{alertData.airportStatus.destination}</div>
+                </div>
+              )}
+            </div>
+          )}
+          {alerts.map((alert: any, i: number) => (
+            <div key={i} className="bg-white/60 dark:bg-white/5 rounded-xl p-3">
+              <div className="flex items-start gap-2">
+                <div className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                  alert.severity === "high" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" :
+                  alert.severity === "medium" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
+                  "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                } capitalize`}>{alert.type}</div>
+                {alert.flight && <span className="text-xs text-muted-foreground">{alert.flight}</span>}
+              </div>
+              <p className="text-sm mt-1.5">{alert.message}</p>
+              {alert.recommendation && (
+                <p className="text-xs text-muted-foreground mt-1 flex items-start gap-1">
+                  <Sparkles className="w-3 h-3 mt-0.5 shrink-0 text-ocean" />
+                  {alert.recommendation}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Itinerary Tab ─────────────────────────────────────────────────────────────
+
+function BudgetBreakdown({ budget, search }: { budget: any; search: Search }) {
+  if (!budget || !budget.totalEstimate) return null;
+
+  const lineItems = [
+    { label: `Flights (×${budget.numTravelers || search.travelers} travelers, round-trip)`, amount: (budget.flightCostPerPerson || 0) * (budget.numTravelers || search.travelers) * 2 },
+    { label: `Hotel (${budget.numDays || 5} nights)`, amount: (budget.hotelCostPerNight || 0) * (budget.numDays || 5) * Math.ceil((budget.numTravelers || search.travelers) / 2) },
+    { label: `Food & Dining (est.)`, amount: (budget.estimatedDailyFood || 60) * (budget.numDays || 5) * (budget.numTravelers || search.travelers) },
+    { label: `Transport (est.)`, amount: (budget.estimatedDailyTransport || 20) * (budget.numDays || 5) * (budget.numTravelers || search.travelers) },
+    { label: `Attractions (est.)`, amount: (budget.estimatedAttractions || 30) * (budget.numDays || 5) * (budget.numTravelers || search.travelers) },
+  ];
+
+  return (
+    <div className="bg-card border border-border rounded-2xl p-5 mb-6">
+      <h3 className="font-display font-bold text-lg mb-4 flex items-center gap-2">
+        <DollarSign className="w-4 h-4 text-ocean" />
+        Budget Estimate
+      </h3>
+      <div className="space-y-2 mb-4">
+        {lineItems.map((item, i) => (
+          <div key={i} className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">{item.label}</span>
+            <span className="font-body font-semibold">${item.amount.toLocaleString()}</span>
+          </div>
+        ))}
+        <div className="border-t border-border pt-3 mt-3 flex items-center justify-between">
+          <span className="font-display font-bold">Total (estimated)</span>
+          <span className="font-display text-2xl font-bold text-ocean">${budget.totalEstimate.toLocaleString()}</span>
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground">Estimates based on cheapest available flight + mid-range hotel. Actual costs may vary.</p>
+    </div>
+  );
+}
+
+function DayCard({ day, index }: { day: any; index: number }) {
+  const [open, setOpen] = useState(index === 0);
+  const periods = [
+    { key: "morning", label: "Morning", color: "text-amber-500", bg: "bg-amber-50 dark:bg-amber-900/10" },
+    { key: "afternoon", label: "Afternoon", color: "text-ocean", bg: "bg-primary/5" },
+    { key: "evening", label: "Evening", color: "text-purple-500", bg: "bg-purple-50 dark:bg-purple-900/10" },
+  ];
+
+  return (
+    <div className="bg-card border border-border rounded-2xl overflow-hidden">
+      <button
+        data-testid={`button-day-${day.day}`}
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-5 py-4 hover:bg-muted/30 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-sm font-display font-bold text-ocean">
+            {day.day}
+          </div>
+          <div className="text-left">
+            <div className="font-display font-bold text-base">{day.theme || `Day ${day.day}`}</div>
+            {day.date && <div className="text-xs text-muted-foreground">{day.date}</div>}
+          </div>
+        </div>
+        {open ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+      </button>
+
+      {open && (
+        <div className="px-5 pb-5 space-y-3">
+          {/* Time slots */}
+          {periods.map(({ key, label, color, bg }) => {
+            const slot = day[key];
+            if (!slot) return null;
+            return (
+              <div key={key} className={`rounded-xl p-3 ${bg}`}>
+                <div className={`text-xs font-semibold uppercase tracking-wide ${color} mb-1.5`}>{label}</div>
+                <div className="font-body font-semibold text-sm">{slot.activity}</div>
+                {slot.location && (
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground mt-0.5">
+                    <MapPin className="w-3 h-3" />{slot.location}
+                  </div>
+                )}
+                {slot.durationHours && (
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground mt-0.5">
+                    <Clock className="w-3 h-3" />{slot.durationHours}h
+                  </div>
+                )}
+                {slot.tip && (
+                  <p className="text-xs text-muted-foreground mt-1.5 italic">{slot.tip}</p>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Meals */}
+          {day.meals && (
+            <div className="grid grid-cols-3 gap-2">
+              {["breakfast", "lunch", "dinner"].map(meal => (
+                day.meals[meal] ? (
+                  <div key={meal} className="bg-muted rounded-xl p-2.5">
+                    <div className="text-xs text-muted-foreground capitalize mb-0.5">{meal}</div>
+                    <div className="text-xs font-medium leading-tight">{day.meals[meal]}</div>
+                  </div>
+                ) : null
+              ))}
+            </div>
+          )}
+
+          {/* Travel tip */}
+          {day.travelTip && (
+            <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/30 rounded-xl p-3 text-xs text-amber-800 dark:text-amber-400">
+              <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>{day.travelTip}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ItineraryTab({ itinerary, search }: { itinerary: any; search: Search }) {
+  if (!itinerary || (!itinerary.days?.length && !itinerary.budget)) {
+    return (
+      <div className="text-center py-12 text-muted-foreground">
+        Itinerary data not available for this search.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <BudgetBreakdown budget={itinerary.budget} search={search} />
+      {itinerary.days?.length > 0 && (
+        <div>
+          <h2 className="font-display text-xl font-bold mb-4 flex items-center gap-2">
+            <CalendarDays className="w-5 h-5 text-ocean" />
+            Day-by-Day Plan
+          </h2>
+          <div className="space-y-3">
+            {itinerary.days.map((day: any, i: number) => (
+              <DayCard key={i} day={day} index={i} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -173,12 +440,14 @@ function FlightCard({ flight, travelers }: { flight: any; travelers: number }) {
 // ─── Accommodation Card ────────────────────────────────────────────────────────
 
 function AccommodationCard({ hotel }: { hotel: any }) {
+  const bookingUrl = hotel.bookingUrl ||
+    `https://www.trivago.com/en-US/srl?search%5Bdest_id%5D=&search%5Bdest_type%5D=&search%5Bhotel_name%5D=${encodeURIComponent(hotel.name)}`;
+
   return (
     <div
       data-testid={`card-hotel-${hotel.name?.replace(/\s+/g, '-').toLowerCase()}`}
       className="bg-card border border-border rounded-2xl overflow-hidden card-hover"
     >
-      {/* Color banner based on stars */}
       <div
         className={`h-3 ${
           hotel.stars >= 5 ? "bg-amber-400" :
@@ -229,9 +498,9 @@ function AccommodationCard({ hotel }: { hotel: any }) {
           data-testid={`button-book-hotel-${hotel.name?.replace(/\s+/g, '-').toLowerCase()}`}
           variant="outline"
           className="w-full border-primary text-primary hover:bg-primary hover:text-primary-foreground"
-          onClick={() => window.open(`https://www.booking.com/search.html?ss=${encodeURIComponent(hotel.name)}`, "_blank", "noopener")}
+          onClick={() => window.open(bookingUrl, "_blank", "noopener")}
         >
-          Book on Booking.com
+          View on Trivago
         </Button>
       </div>
     </div>
@@ -393,11 +662,17 @@ export default function Results() {
   let accommodations: any[] = [];
   let attractions: any[] = [];
   let summaryData: any = {};
+  let itinerary: any = {};
+  let alertData: any = null;
 
   try { flights = JSON.parse(search.flightsData || "{}").flights || []; } catch {}
   try { accommodations = JSON.parse(search.accommodationsData || "{}").accommodations || []; } catch {}
   try { attractions = JSON.parse(search.attractionsData || "{}").attractions || []; } catch {}
   try { summaryData = JSON.parse(search.summary || "{}"); } catch {}
+  try { itinerary = JSON.parse(search.itineraryData || "{}"); } catch {}
+  try { alertData = JSON.parse(search.alertData || "null"); } catch {}
+
+  const hasItinerary = itinerary?.days?.length > 0 || itinerary?.budget?.totalEstimate;
 
   return (
     <div className="min-h-screen bg-background">
@@ -439,12 +714,28 @@ export default function Results() {
 
       {/* Content */}
       <div className="max-w-5xl mx-auto px-6 py-8">
+
+        {/* Disruption Alert Bar */}
+        {alertData && (
+          <DisruptionAlertBar
+            searchId={searchId}
+            alertData={alertData}
+            flightNumber={flights[0]?.flightNumber}
+          />
+        )}
+
         {/* Summary */}
         {summaryData?.summary && <SummaryPanel summaryData={summaryData} search={search} />}
 
         {/* Tabs */}
-        <Tabs defaultValue="flights" className="w-full">
-          <TabsList className="grid w-full grid-cols-3 mb-6 h-12 rounded-xl bg-muted p-1">
+        <Tabs defaultValue={hasItinerary ? "itinerary" : "flights"} className="w-full">
+          <TabsList className={`grid w-full mb-6 h-12 rounded-xl bg-muted p-1 ${hasItinerary ? "grid-cols-4" : "grid-cols-3"}`}>
+            {hasItinerary && (
+              <TabsTrigger value="itinerary" className="rounded-lg flex items-center gap-2 font-body font-medium" data-testid="tab-itinerary">
+                <CalendarDays className="w-4 h-4" />
+                Itinerary
+              </TabsTrigger>
+            )}
             <TabsTrigger value="flights" className="rounded-lg flex items-center gap-2 font-body font-medium" data-testid="tab-flights">
               <Plane className="w-4 h-4" />
               Flights
@@ -461,6 +752,12 @@ export default function Results() {
               <Badge variant="secondary" className="text-xs ml-1">{attractions.length}</Badge>
             </TabsTrigger>
           </TabsList>
+
+          {hasItinerary && (
+            <TabsContent value="itinerary">
+              <ItineraryTab itinerary={itinerary} search={search} />
+            </TabsContent>
+          )}
 
           <TabsContent value="flights">
             <div className="mb-4 flex items-center justify-between">
@@ -481,7 +778,7 @@ export default function Results() {
           <TabsContent value="hotels">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="font-display text-xl font-bold">Accommodations</h2>
-              <span className="text-sm text-muted-foreground">{accommodations.length} options found</span>
+              <span className="text-sm text-muted-foreground">{accommodations.length} options found · via Trivago</span>
             </div>
             {accommodations.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">No hotels found.</div>
@@ -511,34 +808,10 @@ export default function Results() {
           </TabsContent>
         </Tabs>
 
-        {/* Sources */}
-        {summaryData?.sources?.length > 0 && (
-          <div className="mt-8 p-5 bg-card border border-border rounded-2xl">
-            <h3 className="font-display font-bold text-sm mb-3 flex items-center gap-2 text-muted-foreground uppercase tracking-wide">
-              <Globe2 className="w-3.5 h-3.5" />
-              Sources from Perplexity Search
-            </h3>
-            <ul className="space-y-1.5">
-              {summaryData.sources.map((url: string, i: number) => (
-                <li key={i}>
-                  <a
-                    href={url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-ocean hover:underline break-all"
-                  >
-                    {url}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {/* Disclaimer */}
         <div className="mt-6 p-4 bg-muted/60 rounded-xl border border-border text-xs text-muted-foreground text-center">
           <Info className="w-3.5 h-3.5 inline mr-1 mb-0.5" />
-          Results are web-grounded by Perplexity Sonar AI. Prices and availability may vary — always verify with official booking sites before purchasing.
+          Results are web-grounded by Perplexity Sonar AI with Trivago hotel data. Prices and availability may vary — always verify with official booking sites before purchasing.
         </div>
       </div>
     </div>

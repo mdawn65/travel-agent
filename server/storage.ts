@@ -22,9 +22,15 @@ sqlite.exec(`
     accommodations_data TEXT,
     attractions_data TEXT,
     summary TEXT,
+    itinerary_data TEXT,
+    alert_data TEXT,
     created_at INTEGER
   )
 `);
+
+// Add new columns if upgrading from older schema
+try { sqlite.exec(`ALTER TABLE searches ADD COLUMN itinerary_data TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE searches ADD COLUMN alert_data TEXT`); } catch {}
 
 export interface IStorage {
   createSearch(data: InsertSearch): Search;

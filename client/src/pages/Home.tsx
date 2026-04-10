@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import type { Search } from "@shared/schema";
-import { Plane, Hotel, MapPin, Sparkles, Globe2, Star, Clock, ArrowRight } from "lucide-react";
+import { Plane, Hotel, MapPin, Sparkles, Globe2, Clock, ArrowRight, Instagram, Loader2, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 
 const POPULAR_DESTINATIONS = [
   { city: "Paris", country: "France", emoji: "🗼", desc: "City of lights & romance" },
@@ -18,6 +18,128 @@ const POPULAR_DESTINATIONS = [
   { city: "Santorini", country: "Greece", emoji: "🫙", desc: "Clifftop sunsets & bluest sea" },
 ];
 
+const STYLE_EMOJI: Record<string, string> = {
+  adventure: "🧗",
+  luxury: "✨",
+  cultural: "🏛️",
+  beach: "🏖️",
+  foodie: "🍜",
+  urban: "🌆",
+};
+
+// ─── Social Intake Component ───────────────────────────────────────────────────
+function SocialInferencePanel({ onDestinationFound }: { onDestinationFound: (dest: string) => void }) {
+  const [socialUrl, setSocialUrl] = useState("");
+  const [result, setResult] = useState<any>(null);
+  const [showPanel, setShowPanel] = useState(false);
+  const { toast } = useToast();
+
+  const inferMutation = useMutation({
+    mutationFn: async (url: string) => {
+      const res = await apiRequest("POST", "/api/infer-destination", { url });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      if (data.destination) {
+        toast({
+          title: "Destination found!",
+          description: `AI matched your profile to ${data.destination}`,
+        });
+      }
+    },
+    onError: () => {
+      toast({ title: "Could not analyze profile", description: "Please check the URL and try again.", variant: "destructive" });
+    },
+  });
+
+  const handleInfer = () => {
+    if (!socialUrl.trim()) {
+      toast({ title: "Enter a URL", description: "Paste your Instagram or social profile link.", variant: "destructive" });
+      return;
+    }
+    inferMutation.mutate(socialUrl.trim());
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-white/20 bg-white/5 backdrop-blur-sm overflow-hidden">
+      <button
+        onClick={() => setShowPanel(!showPanel)}
+        className="w-full flex items-center justify-between px-4 py-3 text-white/80 hover:text-white transition-colors text-sm"
+        data-testid="button-toggle-social"
+      >
+        <span className="flex items-center gap-2">
+          <Instagram className="w-4 h-4" />
+          <span className="font-medium">Let AI pick your destination from Instagram</span>
+          <span className="text-white/50 text-xs">(optional)</span>
+        </span>
+        {showPanel ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+      </button>
+
+      {showPanel && (
+        <div className="px-4 pb-4 border-t border-white/10 pt-3 space-y-3">
+          <p className="text-white/60 text-xs">
+            Paste your public Instagram or Threads profile URL. The AI reads your posts and aesthetic to suggest where you should go next.
+          </p>
+          <div className="flex gap-2">
+            <Input
+              data-testid="input-social-url"
+              value={socialUrl}
+              onChange={e => setSocialUrl(e.target.value)}
+              placeholder="https://instagram.com/yourusername"
+              className="bg-white/10 border-white/30 text-white placeholder:text-white/40 h-10 text-sm flex-1"
+            />
+            <Button
+              data-testid="button-infer-social"
+              onClick={handleInfer}
+              disabled={inferMutation.isPending}
+              className="bg-amber-400 hover:bg-amber-300 text-amber-900 h-10 px-4 shrink-0"
+            >
+              {inferMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            </Button>
+          </div>
+
+          {result && result.destination && (
+            <div className="bg-white/10 rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">{STYLE_EMOJI[result.suggestedStyle] || "✈️"}</span>
+                    <span className="font-display font-bold text-white">{result.destination}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                      result.confidence === "high" ? "bg-green-400/20 text-green-300" :
+                      result.confidence === "medium" ? "bg-amber-400/20 text-amber-300" :
+                      "bg-white/10 text-white/60"
+                    }`}>{result.confidence} match</span>
+                  </div>
+                  <p className="text-white/60 text-xs mt-1">{result.reasoning}</p>
+                  {result.topInterests?.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {result.topInterests.map((i: string) => (
+                        <span key={i} className="text-xs bg-white/10 text-white/70 px-2 py-0.5 rounded-full">{i}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <Button
+                data-testid="button-use-inferred-destination"
+                size="sm"
+                onClick={() => onDestinationFound(result.destination)}
+                className="w-full bg-white/20 hover:bg-white/30 text-white text-xs h-8"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
+                Use {result.destination} as my destination
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Home Page ───────────────────────────────────────────────────────────
 export default function Home() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -53,6 +175,8 @@ export default function Home() {
 
   const selectDestination = (city: string) => {
     setForm(f => ({ ...f, destination: city }));
+    // Auto-scroll to form
+    document.getElementById("search-form")?.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
@@ -87,12 +211,12 @@ export default function Home() {
               <span className="text-amber-300">Planned in Seconds</span>
             </h1>
             <p className="font-body text-white/75 text-lg max-w-xl mx-auto">
-              Tell us where you're going. Our AI agent finds the best flights, accommodations, and tourist attractions — all arranged for you.
+              Tell us where you're going — or let AI figure it out from your Instagram. Flights, hotels, a day-by-day itinerary, and live disruption alerts.
             </p>
           </div>
 
           {/* Search Form */}
-          <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl p-6 max-w-3xl mx-auto">
+          <div id="search-form" className="bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl p-6 max-w-3xl mx-auto">
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
@@ -176,15 +300,19 @@ export default function Home() {
                 )}
               </Button>
             </form>
+
+            {/* Social inference panel */}
+            <SocialInferencePanel onDestinationFound={(dest) => setForm(f => ({ ...f, destination: dest }))} />
           </div>
 
           {/* Feature pills */}
           <div className="flex flex-wrap justify-center gap-3 mt-8">
             {[
               { icon: Plane, label: "Flights" },
-              { icon: Hotel, label: "Hotels" },
-              { icon: MapPin, label: "Attractions" },
-              { icon: Clock, label: "Instant Results" },
+              { icon: Hotel, label: "Hotels via Trivago" },
+              { icon: MapPin, label: "Day-by-Day Itinerary" },
+              { icon: Clock, label: "Disruption Alerts" },
+              { icon: Instagram, label: "Social Intake" },
             ].map(({ icon: Icon, label }) => (
               <div key={label} className="flex items-center gap-1.5 bg-white/10 rounded-full px-4 py-1.5 text-sm text-white/80">
                 <Icon className="w-3.5 h-3.5" />
@@ -225,13 +353,14 @@ export default function Home() {
         <div className="max-w-5xl mx-auto px-6">
           <div className="text-center mb-10">
             <h2 className="font-display text-3xl font-bold mb-2">How Voyagr Works</h2>
-            <p className="text-muted-foreground">Three steps to your perfect trip</p>
+            <p className="text-muted-foreground">From zero to full trip plan — you barely lift a finger</p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             {[
-              { step: "01", title: "Enter Your Trip", desc: "Tell us your origin, destination, dates, and how many people are traveling.", icon: MapPin },
-              { step: "02", title: "AI Plans Everything", desc: "Our AI agent searches flights, hotels, and top attractions simultaneously.", icon: Sparkles },
-              { step: "03", title: "Book & Go", desc: "Review curated options and book directly. Your adventure awaits.", icon: Plane },
+              { step: "01", title: "Drop a Hint", desc: "Enter origin + destination, or paste your Instagram URL and let AI infer where you should go.", icon: Instagram },
+              { step: "02", title: "AI Plans", desc: "Parallel agents search flights, Trivago hotels, and top attractions simultaneously.", icon: Sparkles },
+              { step: "03", title: "Itinerary Built", desc: "A full day-by-day plan with meals, timing, and total budget estimate is generated for you.", icon: MapPin },
+              { step: "04", title: "Live Alerts", desc: "Disruption agents monitor your route and surface alternatives if something changes.", icon: Clock },
             ].map(({ step, title, desc, icon: Icon }) => (
               <div key={step} className="bg-card rounded-2xl p-6 border border-border relative overflow-hidden">
                 <div className="absolute top-4 right-4 font-display text-5xl font-bold text-border leading-none">{step}</div>
@@ -256,7 +385,7 @@ export default function Home() {
           </svg>
           <span className="font-display font-bold">Voyagr</span>
         </div>
-        <p>AI-powered travel planning · Results are AI-generated suggestions</p>
+        <p>AI-powered travel planning · Results grounded by Perplexity Sonar with Trivago</p>
       </footer>
     </div>
   );
