@@ -185,34 +185,75 @@ async function checkFlightDisruptions(
   return { alerts: [{ type: "normal", severity: "low", message: "No disruptions detected for your route.", recommendation: "Check back closer to departure." }], checkedAt: new Date().toISOString() };
 }
 
-// ─── NEW: Travel style/vibe inference ───────────────────────────────────────
-// Takes free-text: travel style keywords, vibe description, or bucket list hints.
-// Uses Perplexity web search to find trending destinations that match.
-async function inferDestinationFromStyle(styleInput: string): Promise<{
+// ─── Social post search by travel vibe ──────────────────────────────────────
+// Searches Instagram, X (Twitter), and travel web for posts matching a style.
+// Returns real post URLs, captions, locations, and destination suggestions.
+async function searchSocialPostsByVibe(styleInput: string): Promise<{
+  posts: Array<{
+    platform: string;
+    url: string;
+    caption: string;
+    location: string;
+    destination: string;
+    imageContext: string;
+    author: string;
+    likes?: string;
+  }>;
   destination: string;
-  confidence: string;
-  reasoning: string;
-  suggestedStyle: string;
-  topInterests: string[];
   alternatives: string[];
+  reasoning: string;
 }> {
-  const raw = await webSearch(
-    `A traveler describes their travel style and interests as: "${styleInput}". ` +
-    `Search the web for the best travel destinations in 2025-2026 that match this vibe, aesthetic, and interests. ` +
-    `Consider trending destinations, hidden gems, and destinations popular with that travel style. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"destination":"City, Country","confidence":"high|medium|low","reasoning":"2-3 sentences explaining why this destination perfectly matches their described style","suggestedStyle":"adventure|luxury|cultural|beach|foodie|urban","topInterests":["interest1","interest2","interest3"],"alternatives":["City2, Country2","City3, Country3"]}\n` +
-    `Pick the single best matching real destination. Include 2 runner-up alternatives.`
+  // Run two parallel searches: Instagram/social posts + X posts
+  const [instagramRaw, xRaw] = await Promise.all([
+    webSearch(
+      `Search Instagram and travel blogs for posts about "${styleInput}" travel style. ` +
+      `Find real, publicly visible Instagram posts, travel blog posts, or travel content that matches this vibe. ` +
+      `Look for posts with real location tags, captions, and destination names. ` +
+      `Reply ONLY with a JSON array — no markdown, no explanation:\n` +
+      `[{"platform":"Instagram","url":"https://www.instagram.com/p/...","caption":"post caption text","location":"City, Country","destination":"City, Country","imageContext":"describe what the image/reel shows","author":"@username","likes":"12.3k"}]\n` +
+      `Return up to 4 real posts. Use real Instagram post URLs where possible, or travel blog article URLs if Instagram not available.`
+    ),
+    webSearch(
+      `Search X (Twitter) and TikTok for posts about "${styleInput}" travel. ` +
+      `Find real travel posts, threads, or videos matching this travel style and vibe. ` +
+      `Reply ONLY with a JSON array — no markdown, no explanation:\n` +
+      `[{"platform":"X","url":"https://x.com/...","caption":"tweet or post text","location":"City, Country","destination":"City, Country","imageContext":"describe what the post shows","author":"@username","likes":""}]\n` +
+      `Return up to 3 real posts. Prefer posts with location tags and travel content.`
+    ),
+  ]);
+
+  // Also get a destination recommendation
+  const destRaw = await webSearch(
+    `Based on the travel style "${styleInput}", what is the single best matching destination trending in 2025-2026? ` +
+    `Search travel influencer recommendations, travel guides, and trending destinations. ` +
+    `Reply ONLY with a JSON object:\n` +
+    `{"destination":"City, Country","alternatives":["City2, Country2","City3, Country3"],"reasoning":"2 sentences why this is perfect for this travel style"}`
   );
 
-  const parsed = extractJSON(raw);
-  return parsed || {
-    destination: "",
-    confidence: "low",
-    reasoning: "Could not determine a destination from the description.",
-    suggestedStyle: "cultural",
-    topInterests: [],
-    alternatives: [],
+  let posts: any[] = [];
+  try {
+    const ig = extractJSON(instagramRaw);
+    if (Array.isArray(ig)) posts = [...posts, ...ig];
+  } catch {}
+  try {
+    const x = extractJSON(xRaw);
+    if (Array.isArray(x)) posts = [...posts, ...x];
+  } catch {}
+
+  // Filter out clearly fake/placeholder posts
+  posts = posts.filter(p =>
+    p.url && p.url.startsWith("http") &&
+    !p.url.includes("example.com") &&
+    p.caption && p.caption.length > 5
+  );
+
+  const destParsed = extractJSON(destRaw);
+
+  return {
+    posts: posts.slice(0, 6),
+    destination: destParsed?.destination || "",
+    alternatives: destParsed?.alternatives || [],
+    reasoning: destParsed?.reasoning || "",
   };
 }
 
@@ -308,15 +349,15 @@ export function registerRoutes(httpServer: Server, app: Express) {
     res.json(list.reverse().slice(0, 10));
   });
 
-  // ─── Travel style/vibe inference ────────────────────────────────────────────
-  // Accepts free-text style description — Perplexity searches web for matching destinations
+  // ─── Social post search by travel vibe ──────────────────────────────────────
+  // Returns real Instagram/X posts + destination recommendation matching the vibe
   app.post("/api/infer-destination", async (req, res) => {
     try {
       const { styleInput } = req.body;
       if (!styleInput || typeof styleInput !== "string") {
         return res.status(400).json({ error: "styleInput is required" });
       }
-      const result = await inferDestinationFromStyle(styleInput);
+      const result = await searchSocialPostsByVibe(styleInput);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
