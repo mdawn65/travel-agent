@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Travel palette — warm sand, ocean blue, sunset coral */
+@layer base {
+  :root {
+    --background: 38 30% 96%;       /* warm sand */
+    --foreground: 220 30% 12%;      /* deep navy */
+    --card: 38 25% 98%;
+    --card-foreground: 220 30% 12%;
+    --popover: 38 25% 98%;
+    --popover-foreground: 220 30% 12%;
+    --primary: 204 72% 36%;         /* ocean blue */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 38 40% 90%;        /* sand */
+    --secondary-foreground: 220 30% 20%;
+    --muted: 38 20% 92%;
+    --muted-foreground: 220 15% 45%;
+    --accent: 16 85% 58%;           /* sunset coral */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 38 20% 84%;
+    --input: 38 20% 84%;
+    --ring: 204 72% 36%;
+    --radius: 0.75rem;
+    --chart-1: 204 72% 36%;
+    --chart-2: 16 85% 58%;
+    --chart-3: 142 60% 40%;
+    --chart-4: 280 60% 50%;
+    --chart-5: 38 80% 50%;
+
+    /* Custom tokens */
+    --font-display: 'Playfair Display', Georgia, serif;
+    --font-body: 'DM Sans', 'Helvetica Neue', sans-serif;
+    --ocean: 204 72% 36%;
+    --coral: 16 85% 58%;
+    --sand: 38 40% 90%;
+    --gold: 42 85% 52%;
+  }
+
+  .dark {
+    --background: 220 30% 8%;
+    --foreground: 38 20% 92%;
+    --card: 220 28% 11%;
+    --card-foreground: 38 20% 92%;
+    --popover: 220 28% 11%;
+    --popover-foreground: 38 20% 92%;
+    --primary: 204 65% 55%;
+    --primary-foreground: 220 30% 8%;
+    --secondary: 220 20% 18%;
+    --secondary-foreground: 38 20% 85%;
+    --muted: 220 20% 15%;
+    --muted-foreground: 220 10% 55%;
+    --accent: 16 75% 60%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 63% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 20% 20%;
+    --input: 220 20% 20%;
+    --ring: 204 65% 55%;
+    --chart-1: 204 65% 55%;
+    --chart-2: 16 75% 60%;
+    --chart-3: 142 50% 50%;
+    --chart-4: 280 50% 60%;
+    --chart-5: 42 70% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-body);
+    min-height: 100dvh;
+    line-height: 1.6;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    line-height: 1.2;
+    text-wrap: balance;
+  }
+  p, li {
+    text-wrap: pretty;
+  }
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+/* Custom utilities */
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+  }
+  .font-body {
+    font-family: var(--font-body);
+  }
+  .text-ocean {
+    color: hsl(var(--ocean));
+  }
+  .text-coral {
+    color: hsl(var(--coral));
+  }
+  .bg-ocean {
+    background-color: hsl(var(--ocean));
+  }
+  .bg-coral {
+    background-color: hsl(var(--coral));
+  }
+  .bg-sand {
+    background-color: hsl(var(--sand));
+  }
+  .gradient-hero {
+    background: linear-gradient(135deg, hsl(204 80% 20%) 0%, hsl(220 60% 15%) 50%, hsl(16 70% 25%) 100%);
+  }
+  .card-hover {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .card-hover:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.15);
+  }
+}
+
+/* Animated dots loader */
+.dot-loader {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.dot-loader span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: hsl(var(--primary));
+  animation: dotBounce 1.2s ease-in-out infinite;
+}
+.dot-loader span:nth-child(2) { animation-delay: 0.2s; }
+.dot-loader span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dotBounce {
+  0%, 80%, 100% { transform: scale(0.7); opacity: 0.5; }
+  40% { transform: scale(1.1); opacity: 1; }
+}
+
+/* Skeleton pulse */
+.skeleton {
+  background: linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(var(--border)) 50%, hsl(var(--muted)) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Star rating */
+.star { color: hsl(var(--gold)); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
