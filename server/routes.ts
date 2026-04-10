@@ -185,30 +185,34 @@ async function checkFlightDisruptions(
   return { alerts: [{ type: "normal", severity: "low", message: "No disruptions detected for your route.", recommendation: "Check back closer to departure." }], checkedAt: new Date().toISOString() };
 }
 
-// ─── NEW: Social/Instagram URL inference ─────────────────────────────────────
-async function inferDestinationFromSocial(instagramUrl: string): Promise<{
+// ─── NEW: Travel style/vibe inference ───────────────────────────────────────
+// Takes free-text: travel style keywords, vibe description, or bucket list hints.
+// Uses Perplexity web search to find trending destinations that match.
+async function inferDestinationFromStyle(styleInput: string): Promise<{
   destination: string;
   confidence: string;
   reasoning: string;
   suggestedStyle: string;
   topInterests: string[];
+  alternatives: string[];
 }> {
   const raw = await webSearch(
-    `Visit and analyze this Instagram or social media profile URL: ${instagramUrl}. ` +
-    `Look at their travel posts, location tags, saved places, bio, and content to infer where they would most love to travel next. ` +
-    `Based on their aesthetic, interests, travel history visible in posts, and content style, recommend a destination. ` +
+    `A traveler describes their travel style and interests as: "${styleInput}". ` +
+    `Search the web for the best travel destinations in 2025-2026 that match this vibe, aesthetic, and interests. ` +
+    `Consider trending destinations, hidden gems, and destinations popular with that travel style. ` +
     `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"destination":"City, Country","confidence":"high|medium|low","reasoning":"2-3 sentence explanation of why this destination matches their style","suggestedStyle":"adventure|luxury|cultural|beach|foodie|urban","topInterests":["interest1","interest2","interest3"]}\n` +
-    `Pick a specific, real destination. If you can't access the URL, use the username as a clue and suggest based on common travel interests.`
+    `{"destination":"City, Country","confidence":"high|medium|low","reasoning":"2-3 sentences explaining why this destination perfectly matches their described style","suggestedStyle":"adventure|luxury|cultural|beach|foodie|urban","topInterests":["interest1","interest2","interest3"],"alternatives":["City2, Country2","City3, Country3"]}\n` +
+    `Pick the single best matching real destination. Include 2 runner-up alternatives.`
   );
 
   const parsed = extractJSON(raw);
   return parsed || {
     destination: "",
     confidence: "low",
-    reasoning: "Could not analyze the profile.",
+    reasoning: "Could not determine a destination from the description.",
     suggestedStyle: "cultural",
     topInterests: [],
+    alternatives: [],
   };
 }
 
@@ -304,14 +308,15 @@ export function registerRoutes(httpServer: Server, app: Express) {
     res.json(list.reverse().slice(0, 10));
   });
 
-  // ─── NEW: Social/Instagram URL inference ─────────────────────────────────
+  // ─── Travel style/vibe inference ────────────────────────────────────────────
+  // Accepts free-text style description — Perplexity searches web for matching destinations
   app.post("/api/infer-destination", async (req, res) => {
     try {
-      const { url } = req.body;
-      if (!url || typeof url !== "string") {
-        return res.status(400).json({ error: "url is required" });
+      const { styleInput } = req.body;
+      if (!styleInput || typeof styleInput !== "string") {
+        return res.status(400).json({ error: "styleInput is required" });
       }
-      const result = await inferDestinationFromSocial(url);
+      const result = await inferDestinationFromStyle(styleInput);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });

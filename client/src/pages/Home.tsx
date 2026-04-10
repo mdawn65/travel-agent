@@ -27,38 +27,49 @@ const STYLE_EMOJI: Record<string, string> = {
   urban: "🌆",
 };
 
-// ─── Social Intake Component ───────────────────────────────────────────────────
-function SocialInferencePanel({ onDestinationFound }: { onDestinationFound: (dest: string) => void }) {
-  const [socialUrl, setSocialUrl] = useState("");
+// ─── Vibe / Style Inference Panel ──────────────────────────────────────────────
+const VIBE_EXAMPLES = [
+  "Beach sunsets, street food, ancient temples",
+  "Ski mountains, cozy chalets, apres-ski vibes",
+  "Hidden cafes, art galleries, slow travel",
+  "Jungle trekking, wildlife, off the beaten path",
+  "Rooftop bars, fashion, fine dining",
+];
+
+function VibeInferencePanel({ onDestinationFound }: { onDestinationFound: (dest: string) => void }) {
+  const [styleInput, setStyleInput] = useState("");
   const [result, setResult] = useState<any>(null);
   const [showPanel, setShowPanel] = useState(false);
   const { toast } = useToast();
 
   const inferMutation = useMutation({
-    mutationFn: async (url: string) => {
-      const res = await apiRequest("POST", "/api/infer-destination", { url });
+    mutationFn: async (input: string) => {
+      const res = await apiRequest("POST", "/api/infer-destination", { styleInput: input });
       return res.json();
     },
     onSuccess: (data) => {
       setResult(data);
       if (data.destination) {
-        toast({
-          title: "Destination found!",
-          description: `AI matched your profile to ${data.destination}`,
-        });
+        toast({ title: "Destination matched!", description: `AI suggests ${data.destination}` });
       }
     },
     onError: () => {
-      toast({ title: "Could not analyze profile", description: "Please check the URL and try again.", variant: "destructive" });
+      toast({ title: "Couldn't find a match", description: "Try describing your travel style differently.", variant: "destructive" });
     },
   });
 
   const handleInfer = () => {
-    if (!socialUrl.trim()) {
-      toast({ title: "Enter a URL", description: "Paste your Instagram or social profile link.", variant: "destructive" });
+    const input = styleInput.trim();
+    if (!input) {
+      toast({ title: "Describe your vibe", description: "Tell us what kind of trip excites you.", variant: "destructive" });
       return;
     }
-    inferMutation.mutate(socialUrl.trim());
+    inferMutation.mutate(input);
+  };
+
+  const tryExample = (ex: string) => {
+    setStyleInput(ex);
+    inferMutation.mutate(ex);
   };
 
   return (
@@ -66,11 +77,11 @@ function SocialInferencePanel({ onDestinationFound }: { onDestinationFound: (des
       <button
         onClick={() => setShowPanel(!showPanel)}
         className="w-full flex items-center justify-between px-4 py-3 text-white/80 hover:text-white transition-colors text-sm"
-        data-testid="button-toggle-social"
+        data-testid="button-toggle-vibe"
       >
         <span className="flex items-center gap-2">
-          <Instagram className="w-4 h-4" />
-          <span className="font-medium">Let AI pick your destination from Instagram</span>
+          <Sparkles className="w-4 h-4" />
+          <span className="font-medium">Don't know where to go? Describe your vibe</span>
           <span className="text-white/50 text-xs">(optional)</span>
         </span>
         {showPanel ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
@@ -79,18 +90,34 @@ function SocialInferencePanel({ onDestinationFound }: { onDestinationFound: (des
       {showPanel && (
         <div className="px-4 pb-4 border-t border-white/10 pt-3 space-y-3">
           <p className="text-white/60 text-xs">
-            Paste your public Instagram or Threads profile URL. The AI reads your posts and aesthetic to suggest where you should go next.
+            Describe your travel style, interests, or the vibe you're after. Perplexity searches trending 2025-2026 destinations to find your perfect match.
           </p>
+
+          {/* Example chips */}
+          <div className="flex flex-wrap gap-1.5">
+            {VIBE_EXAMPLES.map(ex => (
+              <button
+                key={ex}
+                onClick={() => tryExample(ex)}
+                disabled={inferMutation.isPending}
+                className="text-xs bg-white/10 hover:bg-white/20 text-white/70 hover:text-white px-2.5 py-1 rounded-full transition-colors disabled:opacity-50"
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+
           <div className="flex gap-2">
             <Input
-              data-testid="input-social-url"
-              value={socialUrl}
-              onChange={e => setSocialUrl(e.target.value)}
-              placeholder="https://instagram.com/yourusername"
+              data-testid="input-style-vibe"
+              value={styleInput}
+              onChange={e => setStyleInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleInfer()}
+              placeholder="e.g. beachside vibes, fresh seafood, sunset swims..."
               className="bg-white/10 border-white/30 text-white placeholder:text-white/40 h-10 text-sm flex-1"
             />
             <Button
-              data-testid="button-infer-social"
+              data-testid="button-infer-vibe"
               onClick={handleInfer}
               disabled={inferMutation.isPending}
               className="bg-amber-400 hover:bg-amber-300 text-amber-900 h-10 px-4 shrink-0"
@@ -99,28 +126,46 @@ function SocialInferencePanel({ onDestinationFound }: { onDestinationFound: (des
             </Button>
           </div>
 
+          {inferMutation.isPending && (
+            <p className="text-white/50 text-xs text-center animate-pulse">Searching trending destinations for your vibe...</p>
+          )}
+
           {result && result.destination && (
             <div className="bg-white/10 rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg">{STYLE_EMOJI[result.suggestedStyle] || "✈️"}</span>
-                    <span className="font-display font-bold text-white">{result.destination}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${
-                      result.confidence === "high" ? "bg-green-400/20 text-green-300" :
-                      result.confidence === "medium" ? "bg-amber-400/20 text-amber-300" :
-                      "bg-white/10 text-white/60"
-                    }`}>{result.confidence} match</span>
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-lg">{STYLE_EMOJI[result.suggestedStyle] || "\u2708\ufe0f"}</span>
+                  <span className="font-display font-bold text-white text-base">{result.destination}</span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${
+                    result.confidence === "high" ? "bg-green-400/20 text-green-300" :
+                    result.confidence === "medium" ? "bg-amber-400/20 text-amber-300" :
+                    "bg-white/10 text-white/60"
+                  }`}>{result.confidence} match</span>
+                </div>
+                <p className="text-white/60 text-xs leading-relaxed">{result.reasoning}</p>
+                {result.topInterests?.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {result.topInterests.map((interest: string) => (
+                      <span key={interest} className="text-xs bg-white/10 text-white/70 px-2 py-0.5 rounded-full">{interest}</span>
+                    ))}
                   </div>
-                  <p className="text-white/60 text-xs mt-1">{result.reasoning}</p>
-                  {result.topInterests?.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {result.topInterests.map((i: string) => (
-                        <span key={i} className="text-xs bg-white/10 text-white/70 px-2 py-0.5 rounded-full">{i}</span>
+                )}
+                {result.alternatives?.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-white/40 text-xs mb-1">Also consider:</p>
+                    <div className="flex gap-1.5 flex-wrap">
+                      {result.alternatives.map((alt: string) => (
+                        <button
+                          key={alt}
+                          onClick={() => onDestinationFound(alt)}
+                          className="text-xs bg-white/10 hover:bg-white/20 text-white/70 hover:text-white px-2.5 py-1 rounded-full transition-colors"
+                        >
+                          {alt}
+                        </button>
                       ))}
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
               <Button
                 data-testid="button-use-inferred-destination"
@@ -302,7 +347,7 @@ export default function Home() {
             </form>
 
             {/* Social inference panel */}
-            <SocialInferencePanel onDestinationFound={(dest) => setForm(f => ({ ...f, destination: dest }))} />
+            <VibeInferencePanel onDestinationFound={(dest) => setForm(f => ({ ...f, destination: dest }))} />
           </div>
 
           {/* Feature pills */}
