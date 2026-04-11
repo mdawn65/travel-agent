@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,8 +10,10 @@ import {
   Plane, Hotel, MapPin, ArrowLeft, Clock, Star, Users, Calendar,
   Wifi, Coffee, Utensils, Wind, Zap, Globe2, Info,
   AlertTriangle, CheckCircle2, RefreshCw, CalendarDays,
-  DollarSign, Loader2, ChevronDown, ChevronUp, Sparkles
+  DollarSign, Loader2, ChevronDown, ChevronUp, Sparkles,
+  Bell, BellOff, CloudRain, Newspaper, Eye, EyeOff
 } from "lucide-react";
+import type { MonitorAlert } from "@shared/schema";
 import type { Search } from "@shared/schema";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -621,6 +624,282 @@ function SummaryPanel({ summaryData, search }: { summaryData: any; search: Searc
   );
 }
 
+
+// ─── Signal icons & colors ────────────────────────────────────────────────────
+const SIGNAL_META: Record<string, { icon: any; label: string; color: string }> = {
+  weather: { icon: CloudRain,   label: "Weather",  color: "text-blue-500" },
+  flight:  { icon: Plane,       label: "Flights",  color: "text-ocean" },
+  news:    { icon: Newspaper,   label: "News",     color: "text-purple-500" },
+};
+
+const SEVERITY_STYLE: Record<string, string> = {
+  ok:       "border-green-200 bg-green-50 dark:border-green-800/30 dark:bg-green-900/10",
+  warning:  "border-amber-200 bg-amber-50 dark:border-amber-800/30 dark:bg-amber-900/10",
+  critical: "border-red-200 bg-red-50 dark:border-red-800/30 dark:bg-red-900/10",
+};
+
+const SEVERITY_DOT: Record<string, string> = {
+  ok:       "bg-green-500",
+  warning:  "bg-amber-500",
+  critical: "bg-red-500",
+};
+
+// ─── Single Alert Row ─────────────────────────────────────────────────────────
+function AlertRow({ alert }: { alert: MonitorAlert }) {
+  const meta = SIGNAL_META[alert.signal] || SIGNAL_META.news;
+  const Icon = meta.icon;
+  const checkedAt = alert.checkedAt
+    ? new Date(alert.checkedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+
+  return (
+    <div className={`rounded-xl border p-3 ${SEVERITY_STYLE[alert.severity] || SEVERITY_STYLE.ok}`}>
+      <div className="flex items-start gap-2.5">
+        <div className="mt-0.5 flex flex-col items-center gap-1">
+          <Icon className={`w-4 h-4 shrink-0 ${meta.color}`} />
+          <div className={`w-2 h-2 rounded-full ${SEVERITY_DOT[alert.severity] || "bg-gray-400"}`} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="font-body font-semibold text-sm">{alert.title}</span>
+            {!alert.isRead && (
+              <span className="text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded-full font-medium">New</span>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground leading-relaxed">{alert.body}</p>
+          <div className="flex items-center justify-between mt-1.5 gap-2">
+            <span className="text-xs text-muted-foreground/60">{checkedAt}</span>
+            {alert.source && (
+              <a
+                href={alert.source.startsWith("http") ? alert.source : undefined}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-ocean hover:underline truncate max-w-[160px]"
+              >
+                Source
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Monitor Panel ─────────────────────────────────────────────────────────────
+function MonitorPanel({ search }: { search: any }) {
+  const [isWatched, setIsWatched] = useState<boolean>(!!search.isWatched);
+  const [alerts, setAlerts] = useState<MonitorAlert[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const { toast } = useToast();
+
+  // Poll alerts every 8s when expanded
+  const fetchAlerts = async () => {
+    try {
+      const res = await apiRequest("GET", `/api/searches/${search.id}/alerts`);
+      const data = await res.json();
+      setAlerts(data.alerts || []);
+      setUnread(data.unread || 0);
+    } catch {}
+  };
+
+  useEffect(() => {
+    fetchAlerts();
+  }, []);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const interval = setInterval(fetchAlerts, 8000);
+    return () => clearInterval(interval);
+  }, [expanded]);
+
+  const toggleWatch = async () => {
+    try {
+      const newVal = !isWatched;
+      await apiRequest("POST", `/api/searches/${search.id}/watch`, { watch: newVal });
+      setIsWatched(newVal);
+      toast({
+        title: newVal ? "Monitoring started" : "Monitoring stopped",
+        description: newVal
+          ? "We'll check weather, flights, and destination news daily."
+          : "Daily monitoring has been disabled for this trip.",
+      });
+    } catch {
+      toast({ title: "Error", description: "Could not update watch status.", variant: "destructive" });
+    }
+  };
+
+  const runNow = async () => {
+    setIsRunning(true);
+    try {
+      await apiRequest("POST", `/api/searches/${search.id}/monitor-now`, {});
+      toast({ title: "Check started", description: "Checking weather, flights, and news. Results will appear shortly." });
+      // Poll for new alerts
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        await fetchAlerts();
+        attempts++;
+        if (attempts >= 10) clearInterval(poll);
+      }, 3000);
+      setTimeout(() => { setIsRunning(false); }, 5000);
+    } catch {
+      setIsRunning(false);
+      toast({ title: "Check failed", description: "Please try again.", variant: "destructive" });
+    }
+  };
+
+  const markRead = async () => {
+    await apiRequest("POST", `/api/searches/${search.id}/alerts/read`, {});
+    setUnread(0);
+    setAlerts(prev => prev.map(a => ({ ...a, isRead: true })));
+  };
+
+  const hasCritical = alerts.some(a => a.severity === "critical");
+  const hasWarning  = alerts.some(a => a.severity === "warning");
+  const statusColor = hasCritical ? "text-red-500" : hasWarning ? "text-amber-500" : "text-green-500";
+  const StatusIcon  = hasCritical || hasWarning ? AlertTriangle : CheckCircle2;
+
+  return (
+    <div className="bg-card border border-border rounded-2xl overflow-hidden mb-6">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3 px-5 py-4">
+        <button
+          onClick={() => { setExpanded(!expanded); if (!expanded && unread > 0) markRead(); }}
+          className="flex items-center gap-2.5 flex-1 text-left"
+          data-testid="button-toggle-monitor"
+        >
+          <Bell className={`w-4 h-4 shrink-0 ${isWatched ? "text-ocean" : "text-muted-foreground"}`} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-display font-bold text-base">Trip Monitor</span>
+              {unread > 0 && (
+                <span className="text-xs bg-red-500 text-white px-1.5 py-0.5 rounded-full font-bold min-w-[20px] text-center">
+                  {unread}
+                </span>
+              )}
+              {alerts.length > 0 && (
+                <StatusIcon className={`w-3.5 h-3.5 ${statusColor}`} />
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {isWatched
+                ? "Monitoring weather, flights & news daily"
+                : "Enable daily monitoring for this trip"}
+            </p>
+          </div>
+          {expanded ? <ChevronUp className="w-4 h-4 ml-auto text-muted-foreground" /> : <ChevronDown className="w-4 h-4 ml-auto text-muted-foreground" />}
+        </button>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Check now */}
+          <Button
+            data-testid="button-monitor-now"
+            size="sm"
+            variant="outline"
+            onClick={runNow}
+            disabled={isRunning}
+            className="h-8 px-3 text-xs gap-1.5"
+          >
+            {isRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            Check now
+          </Button>
+          {/* Toggle watch */}
+          <Button
+            data-testid="button-toggle-watch"
+            size="sm"
+            onClick={toggleWatch}
+            className={`h-8 px-3 text-xs gap-1.5 ${
+              isWatched
+                ? "bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 dark:bg-red-900/10 dark:text-red-400"
+                : "bg-primary text-primary-foreground hover:bg-primary/90"
+            }`}
+          >
+            {isWatched ? <><BellOff className="w-3.5 h-3.5" /> Stop</> : <><Bell className="w-3.5 h-3.5" /> Watch</>}
+          </Button>
+        </div>
+      </div>
+
+      {/* Signal summary strip */}
+      {alerts.length > 0 && (
+        <div className="grid grid-cols-3 border-t border-border">
+          {(["weather", "flight", "news"] as const).map(sig => {
+            const latest = [...alerts].find(a => a.signal === sig);
+            const meta = SIGNAL_META[sig];
+            const Icon = meta.icon;
+            return (
+              <div
+                key={sig}
+                className={`flex items-center gap-2 px-4 py-2.5 ${sig !== "news" ? "border-r border-border" : ""}`}
+              >
+                <Icon className={`w-3.5 h-3.5 shrink-0 ${meta.color}`} />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-muted-foreground">{meta.label}</div>
+                  <div className="flex items-center gap-1">
+                    <div className={`w-1.5 h-1.5 rounded-full ${SEVERITY_DOT[latest?.severity || "ok"]}`} />
+                    <span className="text-xs text-foreground capitalize truncate">{latest?.severity || "ok"}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Alert history */}
+      {expanded && (
+        <div className="border-t border-border px-5 py-4">
+          {alerts.length === 0 ? (
+            <div className="text-center py-6">
+              <Bell className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
+              <p className="text-sm text-muted-foreground">No alerts yet.</p>
+              <p className="text-xs text-muted-foreground/70 mt-1">Click "Check now" to run your first monitoring scan.</p>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Alert History</span>
+                {unread > 0 && (
+                  <button onClick={markRead} className="text-xs text-ocean hover:underline flex items-center gap-1">
+                    <Eye className="w-3 h-3" /> Mark all read
+                  </button>
+                )}
+              </div>
+              {alerts.map(alert => (
+                <AlertRow key={alert.id} alert={alert} />
+              ))}
+            </div>
+          )}
+
+          {/* What gets monitored */}
+          <div className="mt-4 pt-4 border-t border-border">
+            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wide mb-2">What the agent monitors</p>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { icon: CloudRain, label: "Weather", desc: "Storms, heatwaves, travel conditions" },
+                { icon: Plane,     label: "Flights",  desc: "Delays, cancellations, route changes" },
+                { icon: Newspaper, label: "News",     desc: "Advisories, entry rules, safety alerts" },
+              ].map(({ icon: Icon, label, desc }) => (
+                <div key={label} className="bg-muted rounded-xl p-3">
+                  <Icon className="w-4 h-4 text-ocean mb-1.5" />
+                  <div className="font-body font-semibold text-xs">{label}</div>
+                  <div className="text-xs text-muted-foreground leading-tight mt-0.5">{desc}</div>
+                </div>
+              ))}
+            </div>
+            {isWatched && (
+              <p className="text-xs text-muted-foreground/70 mt-3 text-center">
+                Runs daily · You'll be notified when anything needs attention
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Results() {
@@ -723,6 +1002,9 @@ export default function Results() {
             flightNumber={flights[0]?.flightNumber}
           />
         )}
+
+        {/* Monitor Panel */}
+        <MonitorPanel search={search} />
 
         {/* Summary */}
         {summaryData?.summary && <SummaryPanel summaryData={summaryData} search={search} />}
