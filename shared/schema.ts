@@ -2,6 +2,7 @@ import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// ─── Legacy: Simple searches ────────────────────────────────────────────────
 export const searches = sqliteTable("searches", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   origin: text("origin").notNull(),
@@ -56,3 +57,23 @@ export type InsertSearch = z.infer<typeof insertSearchSchema>;
 export type Search = typeof searches.$inferSelect;
 export type MonitorAlert = typeof monitorAlerts.$inferSelect;
 export type InsertMonitorAlert = z.infer<typeof insertMonitorAlertSchema>;
+
+// ─── New: Agentic trips ─────────────────────────────────────────────────────
+export const trips = sqliteTable("trips", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  status: text("status").notNull().default("planning"), // planning | done | error
+  preferences: text("preferences"), // JSON: { style, budget, pace }
+  sourceUrl: text("source_url"), // Instagram / Threads URL if applicable
+  tripData: text("trip_data"), // JSON: full TripPlan
+  thoughtSteps: text("thought_steps"), // JSON: ThoughtStep[]
+  createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+});
+
+export const messages = sqliteTable("messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  tripId: integer("trip_id"),
+  role: text("role").notNull(), // user | assistant | system | thought
+  content: text("content").notNull(),
+  metadata: text("metadata"), // JSON: extra data (thought steps, trip card, etc.)
+  createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+});

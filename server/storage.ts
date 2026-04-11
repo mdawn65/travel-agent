@@ -1,15 +1,17 @@
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import Database from "better-sqlite3";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import { searches, monitorAlerts } from "@shared/schema";
 import type { InsertSearch, Search, MonitorAlert, InsertMonitorAlert } from "@shared/schema";
 import { eq, desc } from "drizzle-orm";
 import path from "path";
 
-const sqlite = new Database(path.join(process.cwd(), "data.db"));
-export const db = drizzle(sqlite);
+const client = createClient({
+  url: `file:${path.join(process.cwd(), "data.db")}`,
+});
+export const db = drizzle(client);
 
-// ─── Create / migrate tables ──────────────────────────────────────────────────
-sqlite.exec(`
+// Create tables (sync via execute)
+await client.execute(`
   CREATE TABLE IF NOT EXISTS searches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     origin TEXT NOT NULL,
@@ -29,7 +31,7 @@ sqlite.exec(`
   )
 `);
 
-sqlite.exec(`
+await client.execute(`
   CREATE TABLE IF NOT EXISTS monitor_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     search_id INTEGER NOT NULL,
@@ -43,93 +45,116 @@ sqlite.exec(`
   )
 `);
 
-// Migrate older schemas
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'planning',
+    preferences TEXT,
+    source_url TEXT,
+    trip_data TEXT,
+    thought_steps TEXT,
+    created_at INTEGER
+  )
+`);
+
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id INTEGER,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT,
+    created_at INTEGER
+  )
+`);
+
+// Migrate older schemas by attempting to run ALTER TABLE statements
 const migrations = [
   `ALTER TABLE searches ADD COLUMN itinerary_data TEXT`,
   `ALTER TABLE searches ADD COLUMN alert_data TEXT`,
   `ALTER TABLE searches ADD COLUMN is_watched INTEGER DEFAULT 0`,
 ];
 for (const sql of migrations) {
-  try { sqlite.exec(sql); } catch {}
+  try { await client.execute(sql); } catch {}
 }
 
-// ─── Storage interface ────────────────────────────────────────────────────────
 export interface IStorage {
   // Searches
-  createSearch(data: InsertSearch): Search;
-  getSearch(id: number): Search | undefined;
-  updateSearch(id: number, data: Partial<Search>): Search | undefined;
-  listSearches(): Search[];
-  listWatchedSearches(): Search[];
+  createSearch(data: InsertSearch): Promise<Search>;
+  getSearch(id: number): Promise<Search | undefined>;
+  updateSearch(id: number, data: Partial<Search>): Promise<Search | undefined>;
+  listSearches(): Promise<Search[]>;
+  listWatchedSearches(): Promise<Search[]>;
 
   // Monitor alerts
-  createAlert(data: InsertMonitorAlert): MonitorAlert;
-  getAlerts(searchId: number, limit?: number): MonitorAlert[];
-  getLatestAlert(searchId: number, signal: string): MonitorAlert | undefined;
-  markAlertsRead(searchId: number): void;
-  getUnreadAlertCount(searchId: number): number;
+  createAlert(data: InsertMonitorAlert): Promise<MonitorAlert>;
+  getAlerts(searchId: number, limit?: number): Promise<MonitorAlert[]>;
+  getLatestAlert(searchId: number, signal: string): Promise<MonitorAlert | undefined>;
+  markAlertsRead(searchId: number): Promise<void>;
+  getUnreadAlertCount(searchId: number): Promise<number>;
 }
 
 export class Storage implements IStorage {
   // ── Searches ────────────────────────────────────────────────────────────────
-  createSearch(data: InsertSearch): Search {
-    return db.insert(searches).values({ ...data, createdAt: new Date() }).returning().get();
+  async createSearch(data: InsertSearch): Promise<Search> {
+    const result = await db.insert(searches).values({ ...data, createdAt: new Date() }).returning();
+    return result[0];
   }
 
-  getSearch(id: number): Search | undefined {
-    return db.select().from(searches).where(eq(searches.id, id)).get();
+  async getSearch(id: number): Promise<Search | undefined> {
+    const result = await db.select().from(searches).where(eq(searches.id, id));
+    return result[0];
   }
 
-  updateSearch(id: number, data: Partial<Search>): Search | undefined {
-    return db.update(searches).set(data).where(eq(searches.id, id)).returning().get();
+  async updateSearch(id: number, data: Partial<Search>): Promise<Search | undefined> {
+    const result = await db.update(searches).set(data).where(eq(searches.id, id)).returning();
+    return result[0];
   }
 
-  listSearches(): Search[] {
-    return db.select().from(searches).all();
+  async listSearches(): Promise<Search[]> {
+    return await db.select().from(searches);
   }
 
-  listWatchedSearches(): Search[] {
-    return db.select().from(searches).where(eq(searches.isWatched, true)).all();
+  async listWatchedSearches(): Promise<Search[]> {
+    return await db.select().from(searches).where(eq(searches.isWatched, true));
   }
 
   // ── Monitor alerts ───────────────────────────────────────────────────────────
-  createAlert(data: InsertMonitorAlert): MonitorAlert {
-    return db.insert(monitorAlerts).values({ ...data, checkedAt: new Date() }).returning().get();
+  async createAlert(data: InsertMonitorAlert): Promise<MonitorAlert> {
+    const result = await db.insert(monitorAlerts).values({ ...data, checkedAt: new Date() }).returning();
+    return result[0];
   }
 
-  getAlerts(searchId: number, limit = 30): MonitorAlert[] {
-    return db
+  async getAlerts(searchId: number, limit = 30): Promise<MonitorAlert[]> {
+    return await db
       .select()
       .from(monitorAlerts)
       .where(eq(monitorAlerts.searchId, searchId))
       .orderBy(desc(monitorAlerts.checkedAt))
-      .limit(limit)
-      .all();
+      .limit(limit);
   }
 
-  getLatestAlert(searchId: number, signal: string): MonitorAlert | undefined {
-    return db
+  async getLatestAlert(searchId: number, signal: string): Promise<MonitorAlert | undefined> {
+    const result = await db
       .select()
       .from(monitorAlerts)
       .where(eq(monitorAlerts.searchId, searchId))
       .orderBy(desc(monitorAlerts.checkedAt))
-      .limit(1)
-      .get();
+      .limit(1);
+    return result[0];
   }
 
-  markAlertsRead(searchId: number): void {
-    db.update(monitorAlerts)
+  async markAlertsRead(searchId: number): Promise<void> {
+    await db.update(monitorAlerts)
       .set({ isRead: true })
-      .where(eq(monitorAlerts.searchId, searchId))
-      .run();
+      .where(eq(monitorAlerts.searchId, searchId));
   }
 
-  getUnreadAlertCount(searchId: number): number {
-    const alerts = db
+  async getUnreadAlertCount(searchId: number): Promise<number> {
+    const alerts = await db
       .select()
       .from(monitorAlerts)
-      .where(eq(monitorAlerts.searchId, searchId))
-      .all();
+      .where(eq(monitorAlerts.searchId, searchId));
     return alerts.filter(a => !a.isRead).length;
   }
 }

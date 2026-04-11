@@ -1,445 +1,166 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { Server } from "http";
+import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
-import type { InsertMonitorAlert } from "@shared/schema";
 import { insertSearchSchema } from "@shared/schema";
-import OpenAI from "openai";
+import {
+  parseIntent,
+  planTrip,
+  chatResponse,
+  detectSocialURL,
+  type TripPreferences,
+  type ThoughtStep,
+  type TripPlan,
+} from "./agent";
+import { sonarChat, extractJSON } from "./perplexity";
+import {
+  checkFlightDisruptions,
+  runMonitorForSearch,
+  runMonitorForAllWatched,
+  searchSocialPostsByVibe
+} from "./monitor";
 
-// ─── OpenAI client via platform proxy (injected by llm-api:website) ───────────
-function getClient(): OpenAI {
-  const baseURL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const apiKey = process.env.OPENAI_API_KEY || process.env.PERPLEXITY_API_KEY || "";
-  return new OpenAI({ apiKey, baseURL });
-}
-
-const MODEL = "gpt_5_1";
-
-// ─── Core search function using web_search_preview ────────────────────────────
 async function webSearch(prompt: string): Promise<string> {
-  const client = getClient();
-  const response = await client.responses.create({
-    model: MODEL,
-    input: prompt,
-    tools: [{ type: "web_search_preview" } as any],
-    max_output_tokens: 2500,
-  } as any);
-
-  const output = (response as any).output_text || "";
-  return output;
+  const result = await sonarChat([{ role: "user", content: prompt }]);
+  return result.content;
 }
 
-// ─── JSON extraction helper ───────────────────────────────────────────────────
-function extractJSON(raw: string): any {
-  const cleaned = raw
-    .replace(/^```(?:json)?\s*/im, "")
-    .replace(/\s*```\s*$/im, "")
-    .trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const match = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (match) {
-      try { return JSON.parse(match[1]); } catch {}
-    }
-    return null;
-  }
-}
-
-// ─── Individual search functions ──────────────────────────────────────────────
-
-async function searchFlights(
-  origin: string,
-  destination: string,
-  departureDate: string,
-  returnDate: string,
-  travelers: number
-) {
-  const dateCtx = departureDate ? `departing ${departureDate}` : "with flexible dates";
-  const returnCtx = returnDate ? `, returning ${returnDate}` : "";
-
+// ─── Legacy search functions (keeping for backward compat on /classic) ───────
+async function searchFlightsLegacy(origin: string, destination: string, departureDate: string, returnDate: string, travelers: number) {
   const raw = await webSearch(
-    `Search the web for current flight options from ${origin} to ${destination} ${dateCtx}${returnCtx} for ${travelers} traveler(s). ` +
-    `Find real airlines and realistic prices. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"flights":[{"airline":"","flightNumber":"","departure":"HH:MM","arrival":"HH:MM","duration":"Xh Ym","stops":0,"stopCity":null,"price":0,"class":"Economy","amenities":["Wi-Fi","Meal included"]}]}\n` +
-    `Include exactly 3 different flight options. prices in USD per person.`
+    `Search the web for current flight options from ${origin} to ${destination} departing ${departureDate}${returnDate ? `, returning ${returnDate}` : ""} for ${travelers} traveler(s). Find real airlines and realistic prices. Reply ONLY with JSON: {"flights":[{"airline":"","flightNumber":"","departure":"HH:MM","arrival":"HH:MM","duration":"Xh Ym","stops":0,"stopCity":null,"price":0,"class":"Economy","amenities":["Wi-Fi","Meal included"]}]} Include exactly 3 options. Prices in USD per person.`
   );
-
-  const parsed = extractJSON(raw);
-  return parsed?.flights || [];
+  return extractJSON(raw)?.flights || [];
 }
 
-async function searchAccommodations(
-  destination: string,
-  departureDate: string,
-  returnDate: string,
-  travelers: number
-) {
-  const dateCtx = departureDate && returnDate ? `check-in ${departureDate}, check-out ${returnDate}` : "";
-
+async function searchAccommodationsLegacy(destination: string, departureDate: string, returnDate: string, travelers: number) {
   const raw = await webSearch(
-    `Search the web and trivago for hotels and accommodations in ${destination} ${dateCtx} for ${travelers} guest(s). ` +
-    `Find real hotels with current availability and pricing from trivago and booking sites. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"accommodations":[{"name":"","type":"Hotel","stars":4,"pricePerNight":0,"location":"","description":"","amenities":["Pool","Wi-Fi","Spa"],"rating":4.5,"reviewCount":1000,"bookingUrl":""}]}\n` +
-    `Include exactly 4 options ranging from budget to luxury. Real hotel names in ${destination}. Prices in USD per night. bookingUrl should be a trivago or booking.com search URL for that hotel.`
+    `Search the web for hotels in ${destination}${departureDate && returnDate ? ` check-in ${departureDate}, check-out ${returnDate}` : ""} for ${travelers} guest(s). Reply ONLY with JSON: {"accommodations":[{"name":"","type":"Hotel","stars":4,"pricePerNight":0,"location":"","description":"","amenities":["Pool","Wi-Fi","Spa"],"rating":4.5,"reviewCount":1000}]} Include exactly 4 options. Prices in USD per night.`
   );
-
-  const parsed = extractJSON(raw);
-  return parsed?.accommodations || [];
+  return extractJSON(raw)?.accommodations || [];
 }
 
-async function searchAttractions(destination: string) {
+async function searchAttractionsLegacy(destination: string) {
   const raw = await webSearch(
-    `Search the web for the top tourist attractions and activities in ${destination}. ` +
-    `Find real, popular sights and current visitor details. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"attractions":[{"name":"","type":"Landmark","description":"","duration":"2-3 hours","price":0,"rating":4.5,"bestTime":"Morning","tips":"","address":""}]}\n` +
-    `Types: Landmark, Museum, Nature, Food & Drink, Shopping, Entertainment, Cultural. ` +
-    `Include exactly 6 attractions. Price must be in USD (convert if needed, use 0 if free). Real places in ${destination}. Keep prices reasonable (Tokyo Skytree is ~$17 USD).`
+    `Search the web for top tourist attractions in ${destination}. Reply ONLY with JSON: {"attractions":[{"name":"","type":"Landmark","description":"","duration":"2-3 hours","price":0,"rating":4.5,"bestTime":"Morning","tips":"","address":""}]} Include exactly 6 attractions. Prices in USD.`
   );
-
-  const parsed = extractJSON(raw);
-  return parsed?.attractions || [];
+  return extractJSON(raw)?.attractions || [];
 }
 
-async function searchDestinationInfo(origin: string, destination: string) {
-  const raw = await webSearch(
-    `Search the web for practical travel information for a trip from ${origin} to ${destination}. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"summary":"","bestSeason":"","currency":"","language":"","timezone":"","tips":["","",""],"visaRequired":false,"visaInfo":""}` +
-    `\nMake the summary 2-3 sentences about what to expect. Include 3 practical travel tips.`
-  );
-
-  const parsed = extractJSON(raw);
-  return parsed || {};
-}
-
-// ─── NEW: Multi-step itinerary agent ─────────────────────────────────────────
-async function generateItinerary(
-  origin: string,
-  destination: string,
-  departureDate: string,
-  returnDate: string,
-  travelers: number,
-  attractions: any[],
-  flights: any[],
-  accommodations: any[]
-) {
-  // Calculate trip duration
-  let numDays = 5; // default
-  if (departureDate && returnDate) {
-    const dep = new Date(departureDate);
-    const ret = new Date(returnDate);
-    const diff = Math.round((ret.getTime() - dep.getTime()) / (1000 * 60 * 60 * 24));
-    if (diff > 0) numDays = Math.min(diff, 10);
-  }
-
-  const attractionNames = attractions.slice(0, 6).map((a: any) => a.name).join(", ");
-  const cheapestFlight = flights.sort((a: any, b: any) => a.price - b.price)[0];
-  const midHotel = accommodations[Math.floor(accommodations.length / 2)];
-
-  const raw = await webSearch(
-    `Create a detailed ${numDays}-day travel itinerary for a trip from ${origin} to ${destination}. ` +
-    `Attractions available: ${attractionNames || "top local sights"}. ` +
-    `Search the web for best local restaurants, neighborhoods, and hidden gems in ${destination} to enrich each day. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"days":[{"day":1,"date":"","theme":"","morning":{"activity":"","location":"","tip":"","durationHours":2},"afternoon":{"activity":"","location":"","tip":"","durationHours":3},"evening":{"activity":"","location":"","tip":"","durationHours":2},"meals":{"breakfast":"","lunch":"","dinner":""},"travelTip":""}],` +
-    `"budget":{"flightCostPerPerson":${cheapestFlight?.price || 0},"hotelCostPerNight":${midHotel?.pricePerNight || 0},"estimatedDailyFood":60,"estimatedDailyTransport":20,"estimatedAttractions":30,"numDays":${numDays},"numTravelers":${travelers},"totalEstimate":0,"currency":"USD"}}\n` +
-    `Fill in ${numDays} days. Calculate totalEstimate as: (flightCostPerPerson*numTravelers*2) + (hotelCostPerNight*numDays*ceil(numTravelers/2)) + ((estimatedDailyFood+estimatedDailyTransport+estimatedAttractions)*numDays*numTravelers). Use real restaurant and area names from ${destination}.`
-  );
-
-  const parsed = extractJSON(raw);
-  return parsed || { days: [], budget: {} };
-}
-
-// ─── NEW: Disruption monitoring agent ────────────────────────────────────────
-async function checkFlightDisruptions(
-  flights: any[],
-  origin: string,
-  destination: string,
-  departureDate: string
-) {
-  if (!flights || flights.length === 0) return { alerts: [], checkedAt: new Date().toISOString() };
-
-  const flightRefs = flights
-    .slice(0, 3)
-    .map((f: any) => `${f.airline} ${f.flightNumber}`)
-    .join(", ");
-
-  const dateCtx = departureDate ? `on ${departureDate}` : "soon";
-
-  const raw = await webSearch(
-    `Search the web for current flight status, delays, cancellations, or disruptions for flights from ${origin} to ${destination} ${dateCtx}. ` +
-    `Flights to check: ${flightRefs}. ` +
-    `Also check for any airport delays, weather disruptions, or strikes affecting ${origin} or ${destination} airports. ` +
-    `Reply ONLY with a JSON object — no markdown, no explanation:\n` +
-    `{"alerts":[{"type":"delay|cancellation|weather|strike|normal","severity":"low|medium|high","flight":"","message":"","recommendation":""}],"airportStatus":{"origin":"","destination":""},"checkedAt":"ISO date"}\n` +
-    `If no disruptions found, return one alert with type "normal" and a positive message. checkedAt = current ISO timestamp.`
-  );
-
-  const parsed = extractJSON(raw);
-  if (parsed) {
-    parsed.checkedAt = parsed.checkedAt || new Date().toISOString();
-    return parsed;
-  }
-  return { alerts: [{ type: "normal", severity: "low", message: "No disruptions detected for your route.", recommendation: "Check back closer to departure." }], checkedAt: new Date().toISOString() };
-}
-
-// ─── Social post search by travel vibe ──────────────────────────────────────
-// Searches Instagram, X (Twitter), and travel web for posts matching a style.
-// Returns real post URLs, captions, locations, and destination suggestions.
-async function searchSocialPostsByVibe(styleInput: string): Promise<{
-  posts: Array<{
-    platform: string;
-    url: string;
-    caption: string;
-    location: string;
-    destination: string;
-    imageContext: string;
-    author: string;
-    likes?: string;
-  }>;
-  destination: string;
-  alternatives: string[];
-  reasoning: string;
-}> {
-  // Run two parallel searches: Instagram/social posts + X posts
-  const [instagramRaw, xRaw] = await Promise.all([
-    webSearch(
-      `Search Instagram and travel blogs for posts about "${styleInput}" travel style. ` +
-      `Find real, publicly visible Instagram posts, travel blog posts, or travel content that matches this vibe. ` +
-      `Look for posts with real location tags, captions, and destination names. ` +
-      `Reply ONLY with a JSON array — no markdown, no explanation:\n` +
-      `[{"platform":"Instagram","url":"https://www.instagram.com/p/...","caption":"post caption text","location":"City, Country","destination":"City, Country","imageContext":"describe what the image/reel shows","author":"@username","likes":"12.3k"}]\n` +
-      `Return up to 4 real posts. Use real Instagram post URLs where possible, or travel blog article URLs if Instagram not available.`
-    ),
-    webSearch(
-      `Search X (Twitter) and TikTok for posts about "${styleInput}" travel. ` +
-      `Find real travel posts, threads, or videos matching this travel style and vibe. ` +
-      `Reply ONLY with a JSON array — no markdown, no explanation:\n` +
-      `[{"platform":"X","url":"https://x.com/...","caption":"tweet or post text","location":"City, Country","destination":"City, Country","imageContext":"describe what the post shows","author":"@username","likes":""}]\n` +
-      `Return up to 3 real posts. Prefer posts with location tags and travel content.`
-    ),
+async function generateTravelPlan(origin: string, destination: string, departureDate: string, returnDate: string, travelers: number) {
+  const [flights, accommodations, attractions] = await Promise.all([
+    searchFlightsLegacy(origin, destination, departureDate, returnDate, travelers),
+    searchAccommodationsLegacy(destination, departureDate, returnDate, travelers),
+    searchAttractionsLegacy(destination),
   ]);
-
-  // Also get a destination recommendation
-  const destRaw = await webSearch(
-    `Based on the travel style "${styleInput}", what is the single best matching destination trending in 2025-2026? ` +
-    `Search travel influencer recommendations, travel guides, and trending destinations. ` +
-    `Reply ONLY with a JSON object:\n` +
-    `{"destination":"City, Country","alternatives":["City2, Country2","City3, Country3"],"reasoning":"2 sentences why this is perfect for this travel style"}`
+  const summaryRaw = await webSearch(
+    `Give a brief travel summary for a trip from ${origin} to ${destination}. Reply ONLY with JSON: {"summary":"","bestSeason":"","currency":"","language":"","timezone":"","tips":["","",""],"visaRequired":false,"visaInfo":""}`
   );
-
-  let posts: any[] = [];
-  try {
-    const ig = extractJSON(instagramRaw);
-    if (Array.isArray(ig)) posts = [...posts, ...ig];
-  } catch {}
-  try {
-    const x = extractJSON(xRaw);
-    if (Array.isArray(x)) posts = [...posts, ...x];
-  } catch {}
-
-  // Filter out clearly fake/placeholder posts
-  posts = posts.filter(p =>
-    p.url && p.url.startsWith("http") &&
-    !p.url.includes("example.com") &&
-    p.caption && p.caption.length > 5
-  );
-
-  const destParsed = extractJSON(destRaw);
-
-  return {
-    posts: posts.slice(0, 6),
-    destination: destParsed?.destination || "",
-    alternatives: destParsed?.alternatives || [],
-    reasoning: destParsed?.reasoning || "",
-  };
-}
-
-// ─── Main orchestrator ────────────────────────────────────────────────────────
-async function generateTravelPlan(
-  origin: string,
-  destination: string,
-  departureDate: string,
-  returnDate: string,
-  travelers: number
-) {
-  // Step 1: Run core searches in parallel
-  const [flights, accommodations, attractions, summaryData] = await Promise.all([
-    searchFlights(origin, destination, departureDate, returnDate, travelers),
-    searchAccommodations(destination, departureDate, returnDate, travelers),
-    searchAttractions(destination),
-    searchDestinationInfo(origin, destination),
-  ]);
-
-  // Step 2: Run agentic steps in parallel (itinerary + disruption check)
-  const [itinerary, alertData] = await Promise.all([
-    generateItinerary(origin, destination, departureDate, returnDate, travelers, attractions, flights, accommodations),
-    checkFlightDisruptions(flights, origin, destination, departureDate),
-  ]);
+  const summaryData = extractJSON(summaryRaw) || {};
 
   return {
     flights: { flights },
     accommodations: { accommodations },
     attractions: { attractions },
-    summaryData: {
-      ...summaryData,
-      poweredBy: "Perplexity Sonar (web-grounded)",
-    },
-    itinerary,
-    alertData,
+    summaryData: { ...summaryData, poweredBy: "Perplexity Sonar" },
   };
 }
 
-
-// ─── MONITORING AGENT ─────────────────────────────────────────────────────────
-// Runs 3 parallel Perplexity searches: weather + flight status + destination news
-// Persists results to monitor_alerts table. Called by cron and on-demand.
-
-interface MonitorResult {
-  signal: "weather" | "flight" | "news";
-  severity: "ok" | "warning" | "critical";
-  title: string;
-  body: string;
-  source?: string;
-}
-
-async function checkWeather(destination: string, departureDate: string): Promise<MonitorResult> {
-  const dateCtx = departureDate ? `around ${departureDate}` : "in the coming weeks";
-  try {
-    const raw = await webSearch(
-      `Search the web for current and forecast weather conditions in ${destination} ${dateCtx}. ` +
-      `Look for extreme weather alerts, typhoons, monsoons, heatwaves, winter storms, or travel advisories. ` +
-      `Reply ONLY with a JSON object:\n` +
-      `{"severity":"ok|warning|critical","title":"short headline","body":"2-3 sentences about weather conditions","source":"URL or source name"}\n` +
-      `severity=ok if conditions are normal, warning if notable but manageable, critical if dangerous or travel-disrupting.`
-    );
-    const parsed = extractJSON(raw);
-    if (parsed) return { signal: "weather", ...parsed };
-  } catch {}
-  return { signal: "weather", severity: "ok", title: `Weather in ${destination}`, body: "No unusual weather alerts found.", source: "" };
-}
-
-async function checkFlightStatus(origin: string, destination: string, departureDate: string, flightRefs: string): Promise<MonitorResult> {
-  const dateCtx = departureDate ? `on or around ${departureDate}` : "soon";
-  try {
-    const raw = await webSearch(
-      `Search the web for flight status, delays, cancellations, or route disruptions between ${origin} and ${destination} ${dateCtx}. ` +
-      `${flightRefs ? `Flights to check: ${flightRefs}.` : ""} ` +
-      `Check for airline strikes, airport closures, air traffic control issues, or route suspensions. ` +
-      `Reply ONLY with a JSON object:\n` +
-      `{"severity":"ok|warning|critical","title":"short headline","body":"2-3 sentences about flight/route status","source":"URL or source name"}\n` +
-      `severity=ok if no issues, warning if delays possible, critical if route suspended or major disruption.`
-    );
-    const parsed = extractJSON(raw);
-    if (parsed) return { signal: "flight", ...parsed };
-  } catch {}
-  return { signal: "flight", severity: "ok", title: `${origin} → ${destination} route`, body: "No flight disruptions detected for your route.", source: "" };
-}
-
-async function checkDestinationNews(destination: string): Promise<MonitorResult> {
-  try {
-    const raw = await webSearch(
-      `Search the web for the latest news, travel advisories, safety alerts, visa changes, entry requirement changes, ` +
-      `political unrest, health alerts (disease outbreaks), or natural disasters in ${destination} in the last 7 days. ` +
-      `Reply ONLY with a JSON object:\n` +
-      `{"severity":"ok|warning|critical","title":"short headline","body":"2-3 sentences about what travelers should know","source":"URL or source name"}\n` +
-      `severity=ok if destination is safe and normal, warning if travelers should be aware, critical if advisories recommend against travel.`
-    );
-    const parsed = extractJSON(raw);
-    if (parsed) return { signal: "news", ...parsed };
-  } catch {}
-  return { signal: "news", severity: "ok", title: `${destination} travel news`, body: "No travel advisories or unusual news for this destination.", source: "" };
-}
-
-// ─── Full monitoring run for one trip ────────────────────────────────────────
-export async function runMonitorForSearch(searchId: number): Promise<MonitorResult[]> {
-  const search = storage.getSearch(searchId);
-  if (!search) throw new Error(`Search ${searchId} not found`);
-
-  let flightRefs = "";
-  try {
-    const flights = JSON.parse(search.flightsData || "{}").flights || [];
-    flightRefs = flights.slice(0, 2).map((f: any) => `${f.airline} ${f.flightNumber}`).join(", ");
-  } catch {}
-
-  // Run all 3 checks in parallel
-  const [weather, flight, news] = await Promise.all([
-    checkWeather(search.destination, search.departureDate || ""),
-    checkFlightStatus(search.origin, search.destination, search.departureDate || "", flightRefs),
-    checkDestinationNews(search.destination),
-  ]);
-
-  const results = [weather, flight, news];
-
-  // Persist each result as an alert row
-  for (const r of results) {
-    storage.createAlert({
-      searchId,
-      signal: r.signal,
-      severity: r.severity,
-      title: r.title,
-      body: r.body,
-      source: r.source || "",
-    });
-  }
-
-  return results;
-}
-
-// ─── Run monitoring for ALL watched trips (called by cron) ───────────────────
-export async function runMonitorForAllWatched(): Promise<{ searchId: number; results: MonitorResult[] }[]> {
-  const watched = storage.listWatchedSearches();
-  const allResults = [];
-  for (const search of watched) {
-    try {
-      const results = await runMonitorForSearch(search.id);
-      allResults.push({ searchId: search.id, results });
-    } catch (err: any) {
-      console.error(`Monitor failed for search ${search.id}:`, err.message);
-    }
-  }
-  return allResults;
-}
-
-// ─── Routes ───────────────────────────────────────────────────────────────────
+// ─── Routes ────────────────────────────────────────────────────────────────
 export function registerRoutes(httpServer: Server, app: Express) {
-  // Create a new search
-  app.post("/api/searches", async (req, res) => {
+  // ═══════════════════════════════════════════════════════════════════════
+  //  NEW: WebSocket-based Agentic Chat
+  // ═══════════════════════════════════════════════════════════════════════
+  const wss = new WebSocketServer({ server: httpServer, path: "/ws/chat" });
+
+  wss.on("connection", (ws: WebSocket) => {
+    let history: Array<{ role: "user" | "assistant"; content: string }> = [];
+    let currentTrip: TripPlan | null = null;
+
+    ws.on("message", async (raw: Buffer) => {
+      try {
+        const data = JSON.parse(raw.toString());
+        const userMessage: string = data.message || "";
+        const preferences: TripPreferences = data.preferences || { style: "", budget: "", pace: "" };
+
+        if (!userMessage.trim()) return;
+
+        history.push({ role: "user", content: userMessage });
+
+        // Detect if this is a planning request or casual chat
+        const shouldPlan = await detectPlanningIntent(userMessage, history);
+
+        // Pass history WITHOUT the latest user message (functions add it)
+        const historyContext = history.slice(0, -1);
+
+        if (shouldPlan) {
+          // ── Agentic Planning Mode ──
+          ws.send(JSON.stringify({ type: "thinking_start" }));
+
+          // Parse intent
+          const intent = await parseIntent(userMessage, preferences, historyContext as any);
+
+          // Stream thought steps via WebSocket
+          const tripPlan = await planTrip(intent, preferences, (step: ThoughtStep) => {
+            ws.send(JSON.stringify({ type: "thought", step }));
+          });
+
+          currentTrip = tripPlan;
+
+          // Send the completed trip
+          ws.send(JSON.stringify({ type: "trip", trip: tripPlan }));
+          ws.send(JSON.stringify({ type: "thinking_end" }));
+
+          // Add a summary message to history
+          const summaryMsg = `I've planned a ${tripPlan.itinerary.length}-day trip to ${tripPlan.destination}! ${tripPlan.summary}`;
+          history.push({ role: "assistant", content: summaryMsg });
+          ws.send(JSON.stringify({ type: "message", role: "assistant", content: summaryMsg }));
+        } else {
+          // ── Conversational Mode ──
+          const response = await chatResponse(userMessage, historyContext as any, currentTrip || undefined);
+          history.push({ role: "assistant", content: response });
+          ws.send(JSON.stringify({ type: "message", role: "assistant", content: response }));
+        }
+      } catch (err: any) {
+        console.error("Chat error:", err.message);
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            message: "Something went wrong. Please try again!",
+          })
+        );
+      }
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  LEGACY & MONITORING ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  app.post("/api/searches", async (req: Request, res: Response) => {
     try {
       const parsed = insertSearchSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: parsed.error.message });
       }
-
-      const search = storage.createSearch(parsed.data);
+      const search = await storage.createSearch(parsed.data);
       res.json(search);
-
-      // Kick off async generation
       (async () => {
         try {
-          storage.updateSearch(search.id, { status: "searching" });
-          const { flights, accommodations, attractions, summaryData, itinerary, alertData } = await generateTravelPlan(
-            search.origin,
-            search.destination,
-            search.departureDate || "",
-            search.returnDate || "",
-            search.travelers
+          await storage.updateSearch(search.id, { status: "searching" });
+          const { flights, accommodations, attractions, summaryData } = await generateTravelPlan(
+            search.origin, search.destination, search.departureDate || "", search.returnDate || "", search.travelers
           );
-          storage.updateSearch(search.id, {
+          await storage.updateSearch(search.id, {
             status: "done",
             flightsData: JSON.stringify(flights),
             accommodationsData: JSON.stringify(accommodations),
             attractionsData: JSON.stringify(attractions),
-            summary: JSON.stringify(summaryData),
-            itineraryData: JSON.stringify(itinerary),
-            alertData: JSON.stringify(alertData),
+            summary: JSON.stringify(summaryData)
           });
         } catch (err: any) {
           console.error("Travel plan generation error:", err.message);
-          storage.updateSearch(search.id, { status: "error" });
+          await storage.updateSearch(search.id, { status: "error" });
         }
       })();
     } catch (err: any) {
@@ -447,22 +168,19 @@ export function registerRoutes(httpServer: Server, app: Express) {
     }
   });
 
-  // Get a search by ID (polling endpoint)
-  app.get("/api/searches/:id", (req, res) => {
-    const id = parseInt(req.params.id);
-    const search = storage.getSearch(id);
+  app.get("/api/searches/:id", async (req: Request, res: Response) => {
+    const id = parseInt(req.params.id as string);
+    const search = await storage.getSearch(id);
     if (!search) return res.status(404).json({ error: "Not found" });
     res.json(search);
   });
 
-  // List recent searches
-  app.get("/api/searches", (req, res) => {
-    const list = storage.listSearches();
+  app.get("/api/searches", async (req: Request, res: Response) => {
+    const list = await storage.listSearches();
     res.json(list.reverse().slice(0, 10));
   });
 
   // ─── Social post search by travel vibe ──────────────────────────────────────
-  // Returns real Instagram/X posts + destination recommendation matching the vibe
   app.post("/api/infer-destination", async (req, res) => {
     try {
       const { styleInput } = req.body;
@@ -476,11 +194,11 @@ export function registerRoutes(httpServer: Server, app: Express) {
     }
   });
 
-  // ─── NEW: Re-check flight disruptions for an existing search ─────────────
+  // ─── Re-check flight disruptions for an existing search ─────────────
   app.post("/api/searches/:id/check-disruptions", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const search = storage.getSearch(id);
+      const search = await storage.getSearch(id);
       if (!search) return res.status(404).json({ error: "Not found" });
 
       let flights: any[] = [];
@@ -492,22 +210,21 @@ export function registerRoutes(httpServer: Server, app: Express) {
         search.destination,
         search.departureDate || ""
       );
-      storage.updateSearch(id, { alertData: JSON.stringify(alertData) });
+      await storage.updateSearch(id, { alertData: JSON.stringify(alertData) });
       res.json(alertData);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-
   // ─── Watch/unwatch a trip for daily monitoring ────────────────────────────
   app.post("/api/searches/:id/watch", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const search = storage.getSearch(id);
+      const search = await storage.getSearch(id);
       if (!search) return res.status(404).json({ error: "Not found" });
-      const { watch } = req.body; // true = start watching, false = stop
-      storage.updateSearch(id, { isWatched: watch !== false });
+      const { watch } = req.body;
+      await storage.updateSearch(id, { isWatched: watch !== false });
       res.json({ isWatched: watch !== false });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -515,12 +232,12 @@ export function registerRoutes(httpServer: Server, app: Express) {
   });
 
   // ─── Get alert history for a trip ────────────────────────────────────────
-  app.get("/api/searches/:id/alerts", (req, res) => {
+  app.get("/api/searches/:id/alerts", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const limit = parseInt(req.query.limit as string || "30");
-      const alerts = storage.getAlerts(id, limit);
-      const unread = storage.getUnreadAlertCount(id);
+      const alerts = await storage.getAlerts(id, limit);
+      const unread = await storage.getUnreadAlertCount(id);
       res.json({ alerts, unread });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -528,10 +245,10 @@ export function registerRoutes(httpServer: Server, app: Express) {
   });
 
   // ─── Mark alerts as read ──────────────────────────────────────────────────
-  app.post("/api/searches/:id/alerts/read", (req, res) => {
+  app.post("/api/searches/:id/alerts/read", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      storage.markAlertsRead(id);
+      await storage.markAlertsRead(id);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -542,7 +259,7 @@ export function registerRoutes(httpServer: Server, app: Express) {
   app.post("/api/searches/:id/monitor-now", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const search = storage.getSearch(id);
+      const search = await storage.getSearch(id);
       if (!search) return res.status(404).json({ error: "Not found" });
       res.json({ status: "running" }); // respond immediately
       runMonitorForSearch(id).catch(err => console.error("Monitor error:", err.message));
@@ -552,7 +269,6 @@ export function registerRoutes(httpServer: Server, app: Express) {
   });
 
   // ─── Cron endpoint: run all watched trips ────────────────────────────────
-  // Called by the daily schedule_cron task
   app.post("/api/monitor/run-all", async (req, res) => {
     try {
       const results = await runMonitorForAllWatched();
@@ -563,12 +279,42 @@ export function registerRoutes(httpServer: Server, app: Express) {
   });
 
   // Health / config check
-  app.get("/api/status", (req, res) => {
+  app.get("/api/status", (req: Request, res: Response) => {
     res.json({
       ready: true,
-      model: MODEL,
-      provider: "Perplexity (via web_search_preview)",
-      baseURL: process.env.OPENAI_BASE_URL || "default",
+      model: "sonar-pro",
+      provider: "Perplexity Sonar API",
+      features: ["chat", "url-analysis", "itinerary", "thought-trace", "monitoring"],
     });
   });
 }
+
+// ─── Helper: Detect if user wants to plan a trip ───────────────────────────
+async function detectPlanningIntent(
+  message: string,
+  history: Array<{ role: string; content: string }>
+): Promise<boolean> {
+  // Quick heuristic checks first
+  const lower = message.toLowerCase();
+
+  // URL → always plan
+  if (detectSocialURL(message)) return true;
+
+  // Obvious planning keywords
+  const planKeywords = [
+    "plan", "trip", "travel", "book", "fly", "flight", "hotel",
+    "vacation", "holiday", "itinerary", "go to", "visit", "beach",
+    "adventure", "backpack", "cruise", "destination", "surprise me",
+    "weekend", "getaway",
+  ];
+  if (planKeywords.some((k) => lower.includes(k))) return true;
+
+  // Location pattern (e.g., "tokyo in september")
+  if (/\b(in|to|from)\s+[A-Z][a-z]+/i.test(message)) return true;
+
+  // Budget pattern
+  if (/\$\d+|\d+\s*(?:dollar|usd|budget)/i.test(message)) return true;
+
+  return false;
+}
+
