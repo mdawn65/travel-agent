@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { Server } from "http";
 import { storage } from "./storage";
+import type { InsertMonitorAlert } from "@shared/schema";
 import { insertSearchSchema } from "@shared/schema";
 import OpenAI from "openai";
 
@@ -292,6 +293,117 @@ async function generateTravelPlan(
   };
 }
 
+
+// ─── MONITORING AGENT ─────────────────────────────────────────────────────────
+// Runs 3 parallel Perplexity searches: weather + flight status + destination news
+// Persists results to monitor_alerts table. Called by cron and on-demand.
+
+interface MonitorResult {
+  signal: "weather" | "flight" | "news";
+  severity: "ok" | "warning" | "critical";
+  title: string;
+  body: string;
+  source?: string;
+}
+
+async function checkWeather(destination: string, departureDate: string): Promise<MonitorResult> {
+  const dateCtx = departureDate ? `around ${departureDate}` : "in the coming weeks";
+  try {
+    const raw = await webSearch(
+      `Search the web for current and forecast weather conditions in ${destination} ${dateCtx}. ` +
+      `Look for extreme weather alerts, typhoons, monsoons, heatwaves, winter storms, or travel advisories. ` +
+      `Reply ONLY with a JSON object:\n` +
+      `{"severity":"ok|warning|critical","title":"short headline","body":"2-3 sentences about weather conditions","source":"URL or source name"}\n` +
+      `severity=ok if conditions are normal, warning if notable but manageable, critical if dangerous or travel-disrupting.`
+    );
+    const parsed = extractJSON(raw);
+    if (parsed) return { signal: "weather", ...parsed };
+  } catch {}
+  return { signal: "weather", severity: "ok", title: `Weather in ${destination}`, body: "No unusual weather alerts found.", source: "" };
+}
+
+async function checkFlightStatus(origin: string, destination: string, departureDate: string, flightRefs: string): Promise<MonitorResult> {
+  const dateCtx = departureDate ? `on or around ${departureDate}` : "soon";
+  try {
+    const raw = await webSearch(
+      `Search the web for flight status, delays, cancellations, or route disruptions between ${origin} and ${destination} ${dateCtx}. ` +
+      `${flightRefs ? `Flights to check: ${flightRefs}.` : ""} ` +
+      `Check for airline strikes, airport closures, air traffic control issues, or route suspensions. ` +
+      `Reply ONLY with a JSON object:\n` +
+      `{"severity":"ok|warning|critical","title":"short headline","body":"2-3 sentences about flight/route status","source":"URL or source name"}\n` +
+      `severity=ok if no issues, warning if delays possible, critical if route suspended or major disruption.`
+    );
+    const parsed = extractJSON(raw);
+    if (parsed) return { signal: "flight", ...parsed };
+  } catch {}
+  return { signal: "flight", severity: "ok", title: `${origin} → ${destination} route`, body: "No flight disruptions detected for your route.", source: "" };
+}
+
+async function checkDestinationNews(destination: string): Promise<MonitorResult> {
+  try {
+    const raw = await webSearch(
+      `Search the web for the latest news, travel advisories, safety alerts, visa changes, entry requirement changes, ` +
+      `political unrest, health alerts (disease outbreaks), or natural disasters in ${destination} in the last 7 days. ` +
+      `Reply ONLY with a JSON object:\n` +
+      `{"severity":"ok|warning|critical","title":"short headline","body":"2-3 sentences about what travelers should know","source":"URL or source name"}\n` +
+      `severity=ok if destination is safe and normal, warning if travelers should be aware, critical if advisories recommend against travel.`
+    );
+    const parsed = extractJSON(raw);
+    if (parsed) return { signal: "news", ...parsed };
+  } catch {}
+  return { signal: "news", severity: "ok", title: `${destination} travel news`, body: "No travel advisories or unusual news for this destination.", source: "" };
+}
+
+// ─── Full monitoring run for one trip ────────────────────────────────────────
+export async function runMonitorForSearch(searchId: number): Promise<MonitorResult[]> {
+  const search = storage.getSearch(searchId);
+  if (!search) throw new Error(`Search ${searchId} not found`);
+
+  let flightRefs = "";
+  try {
+    const flights = JSON.parse(search.flightsData || "{}").flights || [];
+    flightRefs = flights.slice(0, 2).map((f: any) => `${f.airline} ${f.flightNumber}`).join(", ");
+  } catch {}
+
+  // Run all 3 checks in parallel
+  const [weather, flight, news] = await Promise.all([
+    checkWeather(search.destination, search.departureDate || ""),
+    checkFlightStatus(search.origin, search.destination, search.departureDate || "", flightRefs),
+    checkDestinationNews(search.destination),
+  ]);
+
+  const results = [weather, flight, news];
+
+  // Persist each result as an alert row
+  for (const r of results) {
+    storage.createAlert({
+      searchId,
+      signal: r.signal,
+      severity: r.severity,
+      title: r.title,
+      body: r.body,
+      source: r.source || "",
+    });
+  }
+
+  return results;
+}
+
+// ─── Run monitoring for ALL watched trips (called by cron) ───────────────────
+export async function runMonitorForAllWatched(): Promise<{ searchId: number; results: MonitorResult[] }[]> {
+  const watched = storage.listWatchedSearches();
+  const allResults = [];
+  for (const search of watched) {
+    try {
+      const results = await runMonitorForSearch(search.id);
+      allResults.push({ searchId: search.id, results });
+    } catch (err: any) {
+      console.error(`Monitor failed for search ${search.id}:`, err.message);
+    }
+  }
+  return allResults;
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 export function registerRoutes(httpServer: Server, app: Express) {
   // Create a new search
@@ -382,6 +494,69 @@ export function registerRoutes(httpServer: Server, app: Express) {
       );
       storage.updateSearch(id, { alertData: JSON.stringify(alertData) });
       res.json(alertData);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+
+  // ─── Watch/unwatch a trip for daily monitoring ────────────────────────────
+  app.post("/api/searches/:id/watch", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const search = storage.getSearch(id);
+      if (!search) return res.status(404).json({ error: "Not found" });
+      const { watch } = req.body; // true = start watching, false = stop
+      storage.updateSearch(id, { isWatched: watch !== false });
+      res.json({ isWatched: watch !== false });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ─── Get alert history for a trip ────────────────────────────────────────
+  app.get("/api/searches/:id/alerts", (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const limit = parseInt(req.query.limit as string || "30");
+      const alerts = storage.getAlerts(id, limit);
+      const unread = storage.getUnreadAlertCount(id);
+      res.json({ alerts, unread });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ─── Mark alerts as read ──────────────────────────────────────────────────
+  app.post("/api/searches/:id/alerts/read", (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      storage.markAlertsRead(id);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ─── On-demand: run full monitor check now ────────────────────────────────
+  app.post("/api/searches/:id/monitor-now", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const search = storage.getSearch(id);
+      if (!search) return res.status(404).json({ error: "Not found" });
+      res.json({ status: "running" }); // respond immediately
+      runMonitorForSearch(id).catch(err => console.error("Monitor error:", err.message));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ─── Cron endpoint: run all watched trips ────────────────────────────────
+  // Called by the daily schedule_cron task
+  app.post("/api/monitor/run-all", async (req, res) => {
+    try {
+      const results = await runMonitorForAllWatched();
+      res.json({ checked: results.length, results });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
